@@ -1,0 +1,27 @@
+# секреты и сессии
+.env
+*.session
+*.session-journal
+.sessions/
+
+# состояние рантайма
+state.json
+*.log
+
+# python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# модели и кэши
+.cache/
+models/
+
+# реальные конфиги
+config/config.yaml
+config/topics.yaml
+config/sources.yaml
