@@ -1,0 +1,18 @@
+# Пример sources.yaml — §4.1 docs/spec.md.
+# Плоский список источников. Пополняется пачками, отдельно от тем.
+
+- id: src_a
+  ref: "@channel_a"
+  status: active            # active | paused | unavailable
+  tags: [diaspora, relocant_2022, de]
+  boost: 0.03                # надбавка к score, диапазон 0.02-0.05 (§5.6)
+  added: 2026-07-20
+  note: "чем канал полезен"
+
+- id: src_b
+  ref: "@channel_b"
+  status: active
+  tags: [diaspora, old_wave, fr]
+  boost: 0.0
+  added: 2026-07-20
+  note: "хроника старой диаспоры"
