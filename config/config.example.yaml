@@ -21,3 +21,4 @@ runtime:
 logging:
   level: INFO
   file: logs/tg_monitor.log
+  timezone: Europe/Riga

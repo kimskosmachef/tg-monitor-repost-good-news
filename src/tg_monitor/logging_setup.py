@@ -1,4 +1,4 @@
-"""Логирование: файл + stdout, метки времени Europe/Riga, уровень из конфига."""
+"""Логирование: файл + stdout, метки времени в таймзоне из конфига (§4)."""
 
 from __future__ import annotations
 
@@ -8,29 +8,31 @@ import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-RIGA_TZ = ZoneInfo("Europe/Riga")
-
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 
 
-class RigaFormatter(logging.Formatter):
-    """Formatter с таймстампами в Europe/Riga независимо от системной TZ."""
+class _TZFormatter(logging.Formatter):
+    """Formatter с таймстампами в заданной таймзоне независимо от системной TZ."""
+
+    def __init__(self, fmt: str, tz: ZoneInfo) -> None:
+        super().__init__(fmt)
+        self._tz = tz
 
     def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
-        moment = dt.datetime.fromtimestamp(record.created, tz=RIGA_TZ)
+        moment = dt.datetime.fromtimestamp(record.created, tz=self._tz)
         if datefmt:
             return moment.strftime(datefmt)
         return moment.isoformat(timespec="seconds")
 
 
-def setup_logging(level: str, log_file: str) -> None:
-    """Настроить root-логгер: вывод в stdout и в файл, единый уровень и формат."""
+def setup_logging(level: str, log_file: str, timezone: str) -> None:
+    """Настроить root-логгер: вывод в stdout и в файл, единый уровень, формат и таймзона."""
     root = logging.getLogger()
     root.setLevel(level)
     for handler in list(root.handlers):
         root.removeHandler(handler)
 
-    formatter = RigaFormatter(_LOG_FORMAT)
+    formatter = _TZFormatter(_LOG_FORMAT, ZoneInfo(timezone))
 
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)

@@ -76,10 +76,11 @@ class AccountConfig(StrictModel):
 
 
 class LoggingConfig(StrictModel):
-    """Логирование — файл + stdout, уровень из конфига (задача пакета п.7)."""
+    """Логирование — файл + stdout, уровень и таймзона меток времени из конфига — §4."""
 
     level: str = "INFO"
     file: str = "logs/tg_monitor.log"
+    timezone: str = "Europe/Riga"
 
 
 class RuntimeConfig(StrictModel):
