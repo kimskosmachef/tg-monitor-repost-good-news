@@ -96,30 +96,30 @@ runtime:
   forward_reposts: true          # репосты внутри источников форвардим как есть
 ```
 
-**topics.yaml:**
+**topics.yaml** — плоский список тем, без ключа верхнего уровня
+(та же форма, что у `sources.yaml` в §4.1):
 
 ```yaml
-topics:
-  - id: topic_one
-    target: "@target_channel_one"
-    sources: all                 # или список id источников
-    threshold: null              # null = shadow-режим, порог не задан
-    chunk_strategy: paragraph
-    facets:                      # грани темы, см. §5.1
-      - id: facet_a
-        examples:
-          - "текст реального поста по этой грани"
-          - "второй пример"
-      - id: facet_b
-        examples: [...]
-    negatives:                   # опционально, см. §5.4
-      - "текст поста, который похож, но не нужен"
+- id: topic_one
+  target: "@target_channel_one"
+  sources: all                 # или список id источников
+  threshold: null              # null = shadow-режим, порог не задан
+  chunk_strategy: paragraph
+  facets:                      # грани темы, см. §5.1
+    - id: facet_a
+      examples:
+        - "текст реального поста по этой грани"
+        - "второй пример"
+    - id: facet_b
+      examples: [...]
+  negatives:                   # опционально, см. §5.4
+    - "текст поста, который похож, но не нужен"
 
-  - id: topic_two
-    target: "@target_channel_two"
-    sources: [src_a, src_c]
-    threshold: 0.44
-    facets: [...]
+- id: topic_two
+  target: "@target_channel_two"
+  sources: [src_a, src_c]
+  threshold: 0.44
+  facets: [...]
 ```
 
 **Правило:** `threshold: null` означает, что тема ещё не откалибрована —
@@ -176,6 +176,10 @@ topics:
 Минимум для рабочей грани — 8–10 примеров. Меньше — центроид переобучен на
 формулировки конкретных постов. Тема с одной гранью — допустимый частный
 случай.
+
+Число примеров — рекомендация, а не валидация, по тому же правилу, что
+и `boost` в §5.6: грань с одним примером загружается, но пишет
+предупреждение в лог. Пустая грань — ошибка конфига.
 
 ### 5.2 Чанкование
 
