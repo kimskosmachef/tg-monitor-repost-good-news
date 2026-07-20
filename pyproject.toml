@@ -16,6 +16,7 @@ dependencies = [
     "telethon>=1.36",
     "python-dotenv>=1.0",
     "ruamel.yaml>=0.18",
+    "qrcode>=7.4",
 ]
 
 [tool.setuptools.packages.find]
@@ -68,4 +69,8 @@ disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
 module = "telethon.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "qrcode.*"
 ignore_missing_imports = true
