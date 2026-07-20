@@ -57,7 +57,10 @@ class StateStore:
 
     def load(self) -> StateData:
         if not self._path.exists():
-            self._log_state_loss(f"{self._path} не найден")
+            # §8: файла не было — это законный первый запуск (или новый
+            # источник), а не потеря состояния. ERROR здесь был бы ложной
+            # тревогой; старт с текущего момента — штатное поведение.
+            self._logger.info("%s не найден: первый запуск, старт с текущего момента", self._path)
             return StateData()
         try:
             raw = self._path.read_text(encoding="utf-8")
@@ -72,8 +75,8 @@ class StateStore:
             return StateData()
 
     def _log_state_loss(self, reason: str) -> None:
-        # §8: отсутствие/порча state.json — ERROR, last_message_id теряются
-        # по всем источникам, история добора не восстанавливается.
+        # §8: файл был, но испорчен/не читается — это настоящая потеря
+        # состояния, а не штатный старт, поэтому ERROR.
         # TODO(пакет 6): уведомление в служебный канал (service_chat).
         self._logger.error(
             "%s: last_message_id потеряны по всем источникам, старт с текущего момента, "
