@@ -16,7 +16,7 @@ import datetime as dt
 import functools
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo
 
 from telethon import errors, events
@@ -64,10 +64,12 @@ class LoggingSink:
 
     async def handle(self, post: Post) -> None:
         self._logger.info(
-            "post source=%s message_id=%s date=%s repost=%s media=%s forward_forbidden=%s text=%r",
+            "post source=%s message_id=%s date=%s origin=%s repost=%s media=%s "
+            "forward_forbidden=%s text=%r",
             post.source_id,
             post.message_id,
             post.date.astimezone(self._tz).isoformat(),
+            post.origin,
             post.is_repost,
             post.has_media,
             post.forward_forbidden,
@@ -126,7 +128,7 @@ def _pick_representative(messages: list[Any]) -> Any:
     return messages[0]
 
 
-def _build_post(source_id: str, messages: list[Any]) -> Post:
+def _build_post(source_id: str, messages: list[Any], origin: Literal["live", "catchup"]) -> Post:
     # §3: время внутри системы — UTC; локальная зона применяется только на
     # выводе (LoggingSink, §3, §9), сюда она не должна попадать.
     representative = _pick_representative(messages)
@@ -143,6 +145,7 @@ def _build_post(source_id: str, messages: list[Any]) -> Post:
         is_repost=_is_repost(representative),
         has_media=_has_media(representative) or grouped_id is not None,
         forward_forbidden=_forward_forbidden(representative),
+        origin=origin,
     )
 
 
@@ -266,13 +269,18 @@ class TelegramReader:
             )
 
     async def _process_batch(self, source_id: str, messages: list[Any]) -> None:
+        # Единственный вызывающий этот метод путь — live (_on_event через
+        # _handle_incoming/_flush_live_group); добор истории вызывает
+        # _emit_batch напрямую со своей меткой origin.
         lock = self._source_locks.setdefault(source_id, asyncio.Lock())
         async with lock:
-            await self._emit_batch(source_id, messages)
+            await self._emit_batch(source_id, messages, origin="live")
 
-    async def _emit_batch(self, source_id: str, messages: list[Any]) -> None:
+    async def _emit_batch(
+        self, source_id: str, messages: list[Any], origin: Literal["live", "catchup"]
+    ) -> None:
         bundle = self._config_store.get()
-        post = _build_post(source_id, messages)
+        post = _build_post(source_id, messages, origin)
         max_id = max(message.id for message in messages)
 
         # §3: отсечка по возрасту считается в UTC — self._now() и post.date
@@ -283,10 +291,11 @@ class TelegramReader:
             # помечается обработанным — молчаливой потери нет (CLAUDE.md).
             self._logger.info(
                 "пост старше max_post_age_min, помечен обработанным без передачи в sink: "
-                "source=%s message_id=%s date=%s",
+                "source=%s message_id=%s date=%s origin=%s",
                 source_id,
                 post.message_id,
                 post.date.isoformat(),
+                origin,
             )
         else:
             await self._sink.handle(post)
@@ -362,14 +371,14 @@ class TelegramReader:
                         message_group = getattr(message, "grouped_id", None)
                         buffer_group = getattr(buffer[0], "grouped_id", None) if buffer else None
                         if buffer and message_group != buffer_group:
-                            await self._emit_batch(source_id, buffer)
+                            await self._emit_batch(source_id, buffer, origin="catchup")
                             buffer = []
                         buffer.append(message)
                         if message_group is None:
-                            await self._emit_batch(source_id, buffer)
+                            await self._emit_batch(source_id, buffer, origin="catchup")
                             buffer = []
                     if buffer:
-                        await self._emit_batch(source_id, buffer)
+                        await self._emit_batch(source_id, buffer, origin="catchup")
                         buffer = []
                     return
                 except errors.FloodWaitError as exc:

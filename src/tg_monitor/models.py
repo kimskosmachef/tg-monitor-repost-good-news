@@ -143,3 +143,7 @@ class Post(BaseModel):
     is_repost: bool = False
     has_media: bool = False
     forward_forbidden: bool = False
+    # Reader-диагностика: пост получен через live events.NewMessage или через
+    # периодический добор истории — без этой метки регрессия в подписке на
+    # события (пост едет только доборот) остаётся незаметной по логу.
+    origin: Literal["live", "catchup"]

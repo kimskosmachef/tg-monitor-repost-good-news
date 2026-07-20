@@ -127,6 +127,7 @@ def test_live_media_group_is_collated_into_one_post(tmp_path: Path) -> None:
     assert post.grouped_id == 555
     assert post.message_ids == [10, 11]
     assert post.has_media is True
+    assert post.origin == "live"
     assert reader._state.last_message_id["src_a"] == 11
 
 
@@ -148,6 +149,7 @@ def test_live_single_message_without_group_is_emitted_immediately(tmp_path: Path
     assert sink.posts[0].text == "привет"
     assert sink.posts[0].grouped_id is None
     assert sink.posts[0].message_ids == [1]
+    assert sink.posts[0].origin == "live"
 
 
 # --- отсечка по возрасту поста ----------------------------------------------
@@ -162,7 +164,7 @@ def test_old_post_is_not_sent_to_sink_but_marked_processed(tmp_path: Path) -> No
         7, date=dt.datetime(2026, 7, 20, 10, 0, tzinfo=dt.UTC), text="старьё"
     )
 
-    asyncio.run(reader._emit_batch("src_a", [old_message]))
+    asyncio.run(reader._emit_batch("src_a", [old_message], origin="catchup"))
 
     assert sink.posts == []
     assert reader._state.last_message_id["src_a"] == 7
@@ -177,7 +179,7 @@ def test_fresh_post_within_age_limit_is_sent_to_sink(tmp_path: Path) -> None:
         8, date=dt.datetime(2026, 7, 20, 14, 30, tzinfo=dt.UTC), text="свежак"
     )
 
-    asyncio.run(reader._emit_batch("src_a", [fresh_message]))
+    asyncio.run(reader._emit_batch("src_a", [fresh_message], origin="catchup"))
 
     assert len(sink.posts) == 1
     assert sink.posts[0].text == "свежак"
@@ -194,7 +196,7 @@ def test_post_date_is_stored_in_utc_regardless_of_logging_timezone(tmp_path: Pat
     reader, _config_store, _state_store, sink = _make_reader(tmp_path, client, sources)
     message = make_message(1, date=dt.datetime(2026, 7, 20, 14, 30, tzinfo=dt.UTC), text="x")
 
-    asyncio.run(reader._emit_batch("src_a", [message]))
+    asyncio.run(reader._emit_batch("src_a", [message], origin="catchup"))
 
     post_date = sink.posts[0].date
     assert post_date == dt.datetime(2026, 7, 20, 14, 30, tzinfo=dt.UTC)
@@ -210,7 +212,7 @@ def test_last_message_id_persisted_to_disk_after_emit(tmp_path: Path) -> None:
     reader, _config_store, state_store, _sink = _make_reader(tmp_path, client, sources)
     message = make_message(3, date=dt.datetime(2026, 7, 20, 14, 0, tzinfo=dt.UTC), text="x")
 
-    asyncio.run(reader._emit_batch("src_a", [message]))
+    asyncio.run(reader._emit_batch("src_a", [message], origin="catchup"))
 
     assert state_store.load().last_message_id == {"src_a": 3}
 
@@ -223,8 +225,8 @@ def test_last_message_id_does_not_go_backwards(tmp_path: Path) -> None:
     older = make_message(5, date=dt.datetime(2026, 7, 20, 14, 0, tzinfo=dt.UTC), text="5")
 
     async def scenario() -> None:
-        await reader._emit_batch("src_a", [newer])
-        await reader._emit_batch("src_a", [older])
+        await reader._emit_batch("src_a", [newer], origin="catchup")
+        await reader._emit_batch("src_a", [older], origin="catchup")
 
     asyncio.run(scenario())
 
@@ -257,6 +259,7 @@ def test_catchup_processes_history_in_chronological_order(tmp_path: Path) -> Non
     assert sink.posts[1].grouped_id == 42
     assert sink.posts[1].text == "два"
     assert sink.posts[1].message_ids == [2, 3]
+    assert all(p.origin == "catchup" for p in sink.posts)
     assert state_store.load().last_message_id == {"src_a": 4}
 
 

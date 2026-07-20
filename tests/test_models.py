@@ -101,7 +101,9 @@ def test_topic_facet_empty_examples_rejected() -> None:
 
 
 def test_post_defaults() -> None:
-    post = Post(message_id=1, source_id="src_a", date=dt.datetime(2026, 7, 20, 12, 0))
+    post = Post(
+        message_id=1, source_id="src_a", date=dt.datetime(2026, 7, 20, 12, 0), origin="live"
+    )
     assert post.text is None
     assert post.is_repost is False
     assert post.has_media is False
