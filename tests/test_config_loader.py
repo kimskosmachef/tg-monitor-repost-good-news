@@ -102,19 +102,22 @@ def test_load_sources_valid(tmp_path: Path) -> None:
     assert sources[0].ref == "@channel_a"
 
 
-def test_load_sources_boost_out_of_range_rejected(tmp_path: Path) -> None:
+def test_load_sources_boost_out_of_range_accepted_with_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
     import yaml
 
-    broken = [{**MINIMAL_SOURCES[0], "boost": 0.5}]
+    above_max = [{**MINIMAL_SOURCES[0], "boost": 0.5}]
     path = tmp_path / "sources.yaml"
-    path.write_text(yaml.safe_dump(broken), encoding="utf-8")
+    path.write_text(yaml.safe_dump(above_max), encoding="utf-8")
 
-    with pytest.raises(ConfigValidationError) as exc_info:
-        load_sources(path)
+    with caplog.at_level(logging.WARNING, logger="tg_monitor.models"):
+        sources = load_sources(path)
 
-    message = str(exc_info.value)
-    assert str(path) in message
-    assert "boost" in message
+    assert sources[0].boost == 0.5
+    assert any("boost" in record.getMessage() for record in caplog.records)
 
 
 def test_example_configs_in_repo_are_valid() -> None:

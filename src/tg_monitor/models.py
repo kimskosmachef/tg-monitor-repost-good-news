@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+logger = logging.getLogger(__name__)
+
 SourceStatus = Literal["active", "paused", "unavailable"]
 ChunkStrategy = Literal["paragraph"]
 
-# §5.6: границы для boost источника. 0.0 — надбавка не задана (по умолчанию).
+# §5.6: границы для boost источника — рекомендация, не валидация.
+# 0.0 — надбавка не задана (по умолчанию).
 BOOST_MIN = 0.02
 BOOST_MAX = 0.05
 
@@ -34,9 +38,15 @@ class Source(StrictModel):
 
     @field_validator("boost")
     @classmethod
-    def _validate_boost(cls, value: float) -> float:
-        if value != 0.0 and not (BOOST_MIN <= value <= BOOST_MAX):
-            raise ValueError(f"boost должен быть 0 или в диапазоне [{BOOST_MIN}, {BOOST_MAX}]")
+    def _warn_boost_above_recommended_max(cls, value: float) -> float:
+        # §5.6: диапазон — рекомендация, не валидация; отказ загружать конфиг
+        # из-за boost — неверное поведение, поэтому только предупреждение.
+        if value > BOOST_MAX:
+            logger.warning(
+                "boost=%s выше рекомендованного максимума %s, значение применяется как есть",
+                value,
+                BOOST_MAX,
+            )
         return value
 
 

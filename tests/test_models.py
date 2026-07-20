@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
 import pytest
-from pydantic import ValidationError
 
 from tg_monitor.models import Post, Source
 
@@ -29,10 +29,25 @@ def test_source_boost_within_range_is_valid(boost: float) -> None:
     assert source.boost == boost
 
 
-@pytest.mark.parametrize("boost", [0.01, 0.06, -0.03])
-def test_source_boost_out_of_range_is_rejected(boost: float) -> None:
-    with pytest.raises(ValidationError):
-        Source.model_validate(_source(boost=boost))
+def test_source_boost_above_max_is_accepted_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="tg_monitor.models"):
+        source = Source.model_validate(_source(boost=0.06))
+
+    assert source.boost == 0.06
+    assert any("boost" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("boost", [0.01, -0.03])
+def test_source_boost_below_max_is_accepted_without_warning(
+    boost: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="tg_monitor.models"):
+        source = Source.model_validate(_source(boost=boost))
+
+    assert source.boost == boost
+    assert caplog.records == []
 
 
 def test_source_defaults() -> None:
