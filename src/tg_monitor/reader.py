@@ -227,7 +227,21 @@ class TelegramReader:
     async def _handle_incoming(self, source_id: str, message: Any) -> None:
         grouped_id = getattr(message, "grouped_id", None)
         if grouped_id is None:
-            await self._process_batch(source_id, [message])
+            try:
+                await self._process_batch(source_id, [message])
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # §9/CLAUDE.md: без этого лога исключение уходит в дефолтный
+                # обработчик Telethon без source_id/message_id — пост не
+                # публикуется и не помечается обработанным. last_message_id
+                # не продвигаем: следующий добор истории подхватит его снова.
+                self._logger.exception(
+                    "необработанная ошибка при обработке сообщения source=%s message_id=%s, "
+                    "пост не отправлен, будет повторно обработан при доборе истории",
+                    source_id,
+                    message.id,
+                )
             return
         key = (source_id, grouped_id)
         self._live_group_buffers.setdefault(key, []).append(message)

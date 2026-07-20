@@ -589,3 +589,37 @@ def test_flush_live_group_logs_unexpected_exception_and_does_not_advance_state(
         "необработанная ошибка при обработке медиагруппы" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_single_live_message_logs_unexpected_exception_and_does_not_advance_state(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    client = FakeClient()
+    _link_entity(client, "@a", "entity_a", "src_a")
+    sources = [_source("src_a", "@a")]
+    reader, config_store, state_store, sink = _make_reader(tmp_path, client, sources)
+
+    async def failing_process_batch(source_id: str, messages: list[object]) -> None:
+        raise RuntimeError("сбой обработки сообщения")
+
+    reader._process_batch = failing_process_batch  # type: ignore[method-assign]
+
+    date = dt.datetime(2026, 7, 20, 14, 55, tzinfo=dt.UTC)
+    message = make_message(11, date=date, text="одиночный пост")
+
+    async def scenario() -> None:
+        bundle = config_store.get()
+        await reader._subscribe_active_sources(bundle.sources)
+        await reader._handle_incoming("src_a", message)
+
+    with caplog.at_level(logging.ERROR, logger="tg_monitor.reader"):
+        asyncio.run(scenario())
+
+    # пост не отправлен и last_message_id не продвинут — следующий добор
+    # истории подхватит то же сообщение повторно, молчаливой потери нет.
+    assert sink.posts == []
+    assert "src_a" not in state_store.load().last_message_id
+    assert any(
+        "необработанная ошибка при обработке сообщения" in record.getMessage()
+        for record in caplog.records
+    )
