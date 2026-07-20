@@ -7,10 +7,8 @@ name = "tg-monitor"
 version = "0.1.0"
 description = "Универсальный монитор Telegram-каналов с тематическим отбором и форвардом"
 requires-python = ">=3.12"
-# Список продублирован в requirements.txt (там же -e . для деплоя одним
-# pip install -r requirements.txt — см. пакет 2). Статический список, а не
-# dynamic из файла: requirements.txt содержит "-e .", и setuptools не может
-# использовать сам себя как источник install_requires для этой же сборки.
+# Единственный источник списка зависимостей: requirements.txt содержит
+# только "-e .", ничего не дублирует.
 dependencies = [
     "pyyaml>=6.0.1",
     "pydantic>=2.7",

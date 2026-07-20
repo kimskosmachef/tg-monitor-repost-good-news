@@ -68,10 +68,13 @@ class FakeClient:
             raise ValueError(f"Cannot find any entity corresponding to {ref!r}")
         return self.entities[ref]
 
-    def iter_messages(self, entity: Any, *, min_id: int, reverse: bool) -> AsyncIterator[Message]:
-        assert reverse is True
+    def iter_messages(
+        self, entity: Any, *, min_id: int = 0, reverse: bool, limit: int | None = None
+    ) -> AsyncIterator[Message]:
         source_id = self.entity_to_source[entity]
-        return self._iter_history(source_id, min_id)
+        if reverse:
+            return self._iter_history(source_id, min_id)
+        return self._iter_latest(source_id, limit)
 
     async def _iter_history(self, source_id: str, min_id: int) -> AsyncIterator[Message]:
         error = self.iter_error.pop(source_id, None)
@@ -80,6 +83,19 @@ class FakeClient:
         for message in self.history.get(source_id, []):
             if message.id > min_id:
                 yield message
+
+    async def _iter_latest(self, source_id: str, limit: int | None) -> AsyncIterator[Message]:
+        # Реальный iter_messages(reverse=False) отдаёт сообщения от новых к
+        # старым — для фейка достаточно развернуть историю (она хранится в
+        # хронологическом порядке) и обрезать по limit.
+        error = self.iter_error.pop(source_id, None)
+        if error is not None:
+            raise error
+        newest_first = list(reversed(self.history.get(source_id, [])))
+        if limit is not None:
+            newest_first = newest_first[:limit]
+        for message in newest_first:
+            yield message
 
     def add_event_handler(self, callback: Callable[[Any], Awaitable[None]], event: Any) -> None:
         chats = event.chats

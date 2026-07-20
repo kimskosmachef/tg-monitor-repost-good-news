@@ -106,3 +106,4 @@ def test_post_defaults() -> None:
     assert post.is_repost is False
     assert post.has_media is False
     assert post.forward_forbidden is False
+    assert post.message_ids == []

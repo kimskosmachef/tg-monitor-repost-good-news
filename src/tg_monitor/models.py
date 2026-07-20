@@ -114,9 +114,7 @@ class RuntimeConfig(StrictModel):
     max_post_age_min: int = Field(gt=0)
     rate_limit_per_hour: int | None = None
     forward_reposts: bool = True
-    # Не описано в §4 спеки — добавлено в пакете 2 для сборки медиагрупп (§7):
-    # короткая задержка перед тем, как считать альбом собранным целиком.
-    # Требует подтверждения Кимом при следующей правке спеки.
+    # §4: окно сборки альбома из отдельных событий в один пост.
     media_group_flush_delay_sec: float = Field(default=2.0, gt=0)
 
 
@@ -139,6 +137,9 @@ class Post(BaseModel):
     date: dt.datetime
     text: str | None = None
     grouped_id: int | None = None
+    # §7: id всех элементов медиагруппы (для одиночного поста — список из
+    # одного id) — без полного списка групповой форвард невозможен.
+    message_ids: list[int] = Field(default_factory=list)
     is_repost: bool = False
     has_media: bool = False
     forward_forbidden: bool = False

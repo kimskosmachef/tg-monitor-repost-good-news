@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from telethon import TelegramClient
 
@@ -48,7 +49,7 @@ async def _main() -> None:
         client=client,
         config_store=config_store,
         state_store=StateStore(args.state),
-        sink=LoggingSink(),
+        sink=LoggingSink(tz=ZoneInfo(bundle.config.logging.timezone)),
     )
     await reader.run()
 

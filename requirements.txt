@@ -1,10 +1,3 @@
-pyyaml>=6.0.1      # чтение config.yaml / topics.yaml / sources.yaml
-pydantic>=2.7      # валидация конфигов со структурированными ошибками (файл + путь к полю)
-tzdata>=2024.1     # база часовых поясов для zoneinfo (Europe/Riga) — не гарантирована на всех системах
-telethon>=1.36     # клиент Telegram (Reader) — §3
-python-dotenv>=1.0 # api_id/api_hash из .env, не из config.yaml — §4, §10
-ruamel.yaml>=0.18  # правка sources.yaml (статус unavailable) с сохранением форматирования — §4.1, §9
-
-# сам проект — без этой строки `pip install -r requirements.txt` не ставит
-# пакет tg_monitor, и `python -m tg_monitor` не находит модуль (см. деплой на VPS)
+# Единственный источник списка зависимостей — pyproject.toml ([project.dependencies]).
+# -e . ставит их вместе с пакетом tg_monitor в editable-режиме, без дублирования списка здесь.
 -e .

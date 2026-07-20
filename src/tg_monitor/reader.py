@@ -28,17 +28,21 @@ from tg_monitor.state import StateStore
 
 logger = logging.getLogger(__name__)
 
-# Источник недоступен или аккаунт из него исключён — §9. ValueError — так
-# Telethon сигнализирует, что get_entity не смог разрешить ref (например,
-# username больше не существует).
+# Источник недоступен или аккаунт из него исключён — §9.
 _UNAVAILABLE_ERRORS: tuple[type[Exception], ...] = (
     errors.ChannelPrivateError,
     errors.ChannelInvalidError,
     errors.UsernameInvalidError,
     errors.UserBannedInChannelError,
     errors.ChatIdInvalidError,
-    ValueError,
 )
+
+# ValueError — так Telethon сигнализирует, что get_entity не смог разрешить
+# ref (например, username больше не существует). Ловим её только при резолве
+# сущности: та же ValueError может всплыть из iter_messages по совсем другой
+# причине, и в этом случае она не означает, что канал недоступен — не стоит
+# из-за случайной ошибки навсегда помечать живой источник unavailable.
+_RESOLVE_ERRORS: tuple[type[Exception], ...] = (*_UNAVAILABLE_ERRORS, ValueError)
 
 
 class Sink(Protocol):
@@ -48,17 +52,22 @@ class Sink(Protocol):
 
 
 class LoggingSink:
-    """Sink для режима наблюдения (пакет 2): печатает пост в лог, никуда не публикует."""
+    """Sink для режима наблюдения (пакет 2): печатает пост в лог, никуда не публикует.
 
-    def __init__(self, log: logging.Logger | None = None) -> None:
+    §3: `Post.date` хранится в UTC, локальная зона (`logging.timezone`)
+    применяется только здесь, при выводе в лог.
+    """
+
+    def __init__(self, log: logging.Logger | None = None, tz: ZoneInfo | None = None) -> None:
         self._logger = log or logger
+        self._tz = tz or ZoneInfo("UTC")
 
     async def handle(self, post: Post) -> None:
         self._logger.info(
             "post source=%s message_id=%s date=%s repost=%s media=%s forward_forbidden=%s text=%r",
             post.source_id,
             post.message_id,
-            post.date.isoformat(),
+            post.date.astimezone(self._tz).isoformat(),
             post.is_repost,
             post.has_media,
             post.forward_forbidden,
@@ -77,7 +86,9 @@ class TelegramClientLike(Protocol):
 
     async def get_entity(self, ref: str) -> Any: ...
 
-    def iter_messages(self, entity: Any, *, min_id: int, reverse: bool) -> Any: ...
+    def iter_messages(
+        self, entity: Any, *, min_id: int = 0, reverse: bool, limit: int | None = None
+    ) -> Any: ...
 
     def add_event_handler(self, callback: Callable[[Any], Awaitable[None]], event: Any) -> None: ...
 
@@ -115,15 +126,20 @@ def _pick_representative(messages: list[Any]) -> Any:
     return messages[0]
 
 
-def _build_post(source_id: str, messages: list[Any], tz: ZoneInfo) -> Post:
+def _build_post(source_id: str, messages: list[Any]) -> Post:
+    # §3: время внутри системы — UTC; локальная зона применяется только на
+    # выводе (LoggingSink, §3, §9), сюда она не должна попадать.
     representative = _pick_representative(messages)
     grouped_id = getattr(representative, "grouped_id", None)
     return Post(
         message_id=representative.id,
         source_id=source_id,
-        date=representative.date.astimezone(tz),
+        date=representative.date.astimezone(dt.UTC),
         text=_text_of(representative),
         grouped_id=grouped_id,
+        # §7: полный список id элементов альбома — без него Publisher не
+        # соберёт групповой форвард.
+        message_ids=sorted(message.id for message in messages),
         is_repost=_is_repost(representative),
         has_media=_has_media(representative) or grouped_id is not None,
         forward_forbidden=_forward_forbidden(representative),
@@ -194,7 +210,7 @@ class TelegramReader:
                     exc.seconds,
                 )
                 await self._sleeper(exc.seconds)
-            except _UNAVAILABLE_ERRORS as exc:
+            except _RESOLVE_ERRORS as exc:
                 self._logger.error(
                     "источник %s недоступен (%s), подписка пропущена", source.id, exc
                 )
@@ -216,12 +232,38 @@ class TelegramReader:
             self._live_flush_tasks[key] = asyncio.create_task(self._flush_live_group(key))
 
     async def _flush_live_group(self, key: tuple[str, int]) -> None:
-        bundle = self._config_store.get()
-        await self._sleeper(bundle.config.runtime.media_group_flush_delay_sec)
+        source_id, grouped_id = key
+        try:
+            bundle = self._config_store.get()
+            await self._sleeper(bundle.config.runtime.media_group_flush_delay_sec)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._logger.exception(
+                "необработанная ошибка при ожидании сборки медиагруппы source=%s grouped_id=%s",
+                source_id,
+                grouped_id,
+            )
         messages = self._live_group_buffers.pop(key, [])
         self._live_flush_tasks.pop(key, None)
-        if messages:
-            await self._process_batch(key[0], messages)
+        if not messages:
+            return
+        try:
+            await self._process_batch(source_id, messages)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # §9/CLAUDE.md: задача фонового флаша никем не ожидается — без
+            # этого лога исключение здесь тонет молча, а пост не публикуется
+            # и не помечается обработанным. last_message_id не продвигаем:
+            # следующий добор истории подхватит эти же message_id повторно.
+            self._logger.exception(
+                "необработанная ошибка при обработке медиагруппы source=%s grouped_id=%s "
+                "message_ids=%s, пост не отправлен, будет повторно обработан при доборе истории",
+                source_id,
+                grouped_id,
+                sorted(message.id for message in messages),
+            )
 
     async def _process_batch(self, source_id: str, messages: list[Any]) -> None:
         lock = self._source_locks.setdefault(source_id, asyncio.Lock())
@@ -230,10 +272,11 @@ class TelegramReader:
 
     async def _emit_batch(self, source_id: str, messages: list[Any]) -> None:
         bundle = self._config_store.get()
-        tz = ZoneInfo(bundle.config.logging.timezone)
-        post = _build_post(source_id, messages, tz)
+        post = _build_post(source_id, messages)
         max_id = max(message.id for message in messages)
 
+        # §3: отсечка по возрасту считается в UTC — self._now() и post.date
+        # оба UTC, локальная зона логирования сюда не подмешивается.
         age_cutoff = self._now() - dt.timedelta(minutes=bundle.config.runtime.max_post_age_min)
         if post.date < age_cutoff:
             # §7: старьё после долгого простоя не отдаётся дальше, но
@@ -257,16 +300,58 @@ class TelegramReader:
 
     async def _catchup_loop(self) -> None:
         while True:
-            bundle = self._config_store.get()
-            await self._subscribe_active_sources(bundle.sources)
-            for source_id, entity in list(self._entities.items()):
-                await self._catchup_source(source_id, entity)
+            try:
+                bundle = self._config_store.get()
+                await self._subscribe_active_sources(bundle.sources)
+                for source_id, entity in list(self._entities.items()):
+                    await self._catchup_source(source_id, entity)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # §9/CLAUDE.md: непойманная ошибка не должна тихо убить фоновую
+                # задачу — тогда добор истории останавливается по всем
+                # источникам без единой строки в логе. Логируем и продолжаем
+                # цикл, следующая итерация — обычный повтор.
+                self._logger.exception(
+                    "необработанная ошибка в цикле добора истории, цикл продолжается"
+                )
             bundle = self._config_store.get()
             await self._sleeper(bundle.config.runtime.catchup_interval_min * 60)
+
+    async def _seed_last_message_id(self, source_id: str, entity: Any) -> None:
+        # §8: без сохранённого last_message_id (первый запуск или новый
+        # источник) стартуем «с текущего момента» — архив канала не поднимаем,
+        # находим только id последнего поста и продолжаем от него.
+        while True:
+            try:
+                latest_id = 0
+                async for message in self._client.iter_messages(entity, reverse=False, limit=1):
+                    latest_id = message.id
+                self._state.last_message_id[source_id] = latest_id
+                self._state_store.save(self._state)
+                return
+            except errors.FloodWaitError as exc:
+                self._logger.warning(
+                    "FloodWait при определении текущей позиции source=%s: ожидание %s секунд",
+                    source_id,
+                    exc.seconds,
+                )
+                await self._sleeper(exc.seconds)
+            except _UNAVAILABLE_ERRORS as exc:
+                self._logger.error(
+                    "источник %s недоступен при определении текущей позиции (%s), пропуск",
+                    source_id,
+                    exc,
+                )
+                self._mark_unavailable(source_id)
+                return
 
     async def _catchup_source(self, source_id: str, entity: Any) -> None:
         lock = self._source_locks.setdefault(source_id, asyncio.Lock())
         async with lock:
+            if source_id not in self._state.last_message_id:
+                await self._seed_last_message_id(source_id, entity)
+                return
             buffer: list[Any] = []
             while True:
                 min_id = self._state.last_message_id.get(source_id, 0)
