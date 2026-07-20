@@ -6,7 +6,7 @@ import datetime as dt
 import logging
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,9 @@ ChunkStrategy = Literal["paragraph"]
 # 0.0 — надбавка не задана (по умолчанию).
 BOOST_MIN = 0.02
 BOOST_MAX = 0.05
+
+# §5.1: рекомендованный минимум примеров на грань — рекомендация, не валидация.
+FACET_MIN_EXAMPLES = 8
 
 
 class StrictModel(BaseModel):
@@ -67,6 +70,24 @@ class Topic(StrictModel):
     chunk_strategy: ChunkStrategy = "paragraph"
     facets: list[Facet] = Field(min_length=1)
     negatives: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _warn_facets_below_recommended_examples(self) -> Topic:
+        # §5.1: число примеров в грани — рекомендация, не валидация, по тому
+        # же правилу, что и boost в §5.6: грань с малым числом примеров
+        # загружается, но пишет предупреждение с id темы и грани.
+        # Пустая грань (0 примеров) — ошибка конфига, отсекается на уровне
+        # Facet.examples (min_length=1) до этой проверки.
+        for facet in self.facets:
+            if len(facet.examples) < FACET_MIN_EXAMPLES:
+                logger.warning(
+                    "тема %s, грань %s: %d примеров меньше рекомендованных %d",
+                    self.id,
+                    facet.id,
+                    len(facet.examples),
+                    FACET_MIN_EXAMPLES,
+                )
+        return self
 
 
 class AccountConfig(StrictModel):

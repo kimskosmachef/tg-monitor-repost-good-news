@@ -4,8 +4,9 @@ import datetime as dt
 import logging
 
 import pytest
+from pydantic import ValidationError
 
-from tg_monitor.models import Post, Source
+from tg_monitor.models import FACET_MIN_EXAMPLES, Post, Source, Topic
 
 
 def _source(**overrides: object) -> dict[str, object]:
@@ -13,6 +14,16 @@ def _source(**overrides: object) -> dict[str, object]:
         "id": "src_a",
         "ref": "@channel_a",
         "added": dt.date(2026, 7, 20),
+    }
+    base.update(overrides)
+    return base
+
+
+def _topic(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "id": "topic_one",
+        "target": "@target_channel_one",
+        "facets": [{"id": "facet_a", "examples": ["один пример"]}],
     }
     base.update(overrides)
     return base
@@ -56,6 +67,37 @@ def test_source_defaults() -> None:
     assert source.tags == []
     assert source.boost == 0.0
     assert source.note == ""
+
+
+def test_topic_facet_below_recommended_examples_is_accepted_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="tg_monitor.models"):
+        topic = Topic.model_validate(
+            _topic(facets=[{"id": "facet_a", "examples": ["один", "два"]}])
+        )
+
+    assert len(topic.facets[0].examples) == 2
+    assert any(
+        "topic_one" in record.getMessage() and "facet_a" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+def test_topic_facet_at_recommended_examples_is_accepted_without_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    examples = [f"пример {i}" for i in range(FACET_MIN_EXAMPLES)]
+    with caplog.at_level(logging.WARNING, logger="tg_monitor.models"):
+        topic = Topic.model_validate(_topic(facets=[{"id": "facet_a", "examples": examples}]))
+
+    assert len(topic.facets[0].examples) == FACET_MIN_EXAMPLES
+    assert caplog.records == []
+
+
+def test_topic_facet_empty_examples_rejected() -> None:
+    with pytest.raises(ValidationError):
+        Topic.model_validate(_topic(facets=[{"id": "facet_a", "examples": []}]))
 
 
 def test_post_is_described_but_unpopulated_in_skeleton() -> None:

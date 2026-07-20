@@ -90,6 +90,32 @@ def test_load_topics_empty_facet_examples_rejected(tmp_path: Path) -> None:
     assert "facets" in message
 
 
+def test_load_topics_facet_below_recommended_examples_accepted_with_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    import yaml
+
+    few_examples = [
+        {
+            **MINIMAL_TOPICS[0],
+            "facets": [{"id": "facet_a", "examples": ["один пример"]}],
+        }
+    ]
+    path = tmp_path / "topics.yaml"
+    path.write_text(yaml.safe_dump(few_examples), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger="tg_monitor.models"):
+        topics = load_topics(path)
+
+    assert topics[0].facets[0].examples == ["один пример"]
+    assert any(
+        "topic_one" in record.getMessage() and "facet_a" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_load_sources_valid(tmp_path: Path) -> None:
     import yaml
 
