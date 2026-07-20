@@ -1,0 +1,26 @@
+# Шаблон systemd-юнита. Плейсхолдеры __TG_MONITOR_*__ подставляются при деплое.
+# ExecStart ссылается на точку входа tg_monitor.__main__, которая появится
+# в одном из следующих пакетов (в пакете 1 её ещё нет — это только заготовка).
+[Unit]
+Description=tg-monitor — монитор Telegram-каналов с тематическим отбором
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__TG_MONITOR_USER__
+Group=__TG_MONITOR_USER__
+WorkingDirectory=__TG_MONITOR_APP_DIR__
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__TG_MONITOR_APP_DIR__/.venv/bin/python -m tg_monitor --config __TG_MONITOR_CONFIG_DIR__/config.yaml
+Restart=on-failure
+RestartSec=5
+
+# Изоляция от остальной системы. Пути настраиваются под конкретный деплой.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=__TG_MONITOR_APP_DIR__ __TG_MONITOR_CONFIG_DIR__ __TG_MONITOR_STATE_DIR__
+
+[Install]
+WantedBy=multi-user.target

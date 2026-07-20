@@ -1,0 +1,6 @@
+-r requirements.txt
+
+pytest>=8.0        # тесты
+ruff>=0.6           # линт + форматтер
+mypy>=1.10          # статическая типизация (strict)
+types-PyYAML>=6.0   # тайпстабы для pyyaml под mypy strict

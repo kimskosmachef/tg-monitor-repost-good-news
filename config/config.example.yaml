@@ -1,0 +1,24 @@
+# Пример config.yaml — §4 docs/spec.md.
+# Реальный config.yaml в git не попадает (см. .gitignore).
+
+account:
+  session_path: ~/.tg-monitor/monitor.session   # вне репозитория
+
+service_chat: "@tg_monitor_service"              # ошибки и служебные сообщения
+
+sources_file: sources.yaml                       # реестр источников, см. sources.example.yaml
+topics_file: topics.yaml                         # темы, см. topics.example.yaml
+
+runtime:
+  catchup_interval_min: 15
+  dedup_window_hours: 48
+  dedup_threshold: 0.85
+  publish_delay_sec: 3
+  max_post_age_min: 120        # не форвардить старьё после долгого простоя
+  rate_limit_per_hour: null    # заготовка, в v1 выключено (§7)
+  forward_reposts: true        # репосты внутри источников форвардим как есть
+
+logging:
+  level: INFO
+  file: logs/tg-monitor.log
+  timezone: Europe/Riga
