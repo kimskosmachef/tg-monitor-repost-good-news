@@ -7,10 +7,18 @@ name = "tg-monitor"
 version = "0.1.0"
 description = "Универсальный монитор Telegram-каналов с тематическим отбором и форвардом"
 requires-python = ">=3.12"
-dynamic = ["dependencies"]
-
-[tool.setuptools.dynamic]
-dependencies = { file = "requirements.txt" }
+# Список продублирован в requirements.txt (там же -e . для деплоя одним
+# pip install -r requirements.txt — см. пакет 2). Статический список, а не
+# dynamic из файла: requirements.txt содержит "-e .", и setuptools не может
+# использовать сам себя как источник install_requires для этой же сборки.
+dependencies = [
+    "pyyaml>=6.0.1",
+    "pydantic>=2.7",
+    "tzdata>=2024.1",
+    "telethon>=1.36",
+    "python-dotenv>=1.0",
+    "ruamel.yaml>=0.18",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -59,3 +67,7 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "telethon.*"
+ignore_missing_imports = true

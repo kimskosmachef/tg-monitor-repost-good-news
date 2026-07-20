@@ -26,6 +26,7 @@ class ConfigBundle:
     config: Config
     topics: list[Topic]
     sources: list[Source]
+    sources_path: Path
 
 
 @dataclass
@@ -85,6 +86,7 @@ class ConfigStore:
             config=self._config_file.value,
             topics=self._topics_file.value,
             sources=self._sources_file.value,
+            sources_path=self._sources_file.path,
         )
 
     def _resync_dependent_path[T](self, tracked: _TrackedFile[T], configured_name: str) -> None:

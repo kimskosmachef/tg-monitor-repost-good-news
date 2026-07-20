@@ -114,6 +114,10 @@ class RuntimeConfig(StrictModel):
     max_post_age_min: int = Field(gt=0)
     rate_limit_per_hour: int | None = None
     forward_reposts: bool = True
+    # Не описано в §4 спеки — добавлено в пакете 2 для сборки медиагрупп (§7):
+    # короткая задержка перед тем, как считать альбом собранным целиком.
+    # Требует подтверждения Кимом при следующей правке спеки.
+    media_group_flush_delay_sec: float = Field(default=2.0, gt=0)
 
 
 class Config(StrictModel):
@@ -128,12 +132,13 @@ class Config(StrictModel):
 
 
 class Post(BaseModel):
-    """Пост источника. В пакете 1 только описан, не заполняется (Reader/Matcher — пакеты 2-3)."""
+    """Нормализованный пост источника — §3, §5.3, дополнено в пакете 2 (Reader)."""
 
-    id: int
+    message_id: int
     source_id: str
     date: dt.datetime
     text: str | None = None
-    media_group_id: int | None = None
+    grouped_id: int | None = None
     is_repost: bool = False
+    has_media: bool = False
     forward_forbidden: bool = False
