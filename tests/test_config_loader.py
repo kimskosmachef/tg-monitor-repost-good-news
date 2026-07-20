@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.conftest import MINIMAL_CONFIG, MINIMAL_SOURCES, MINIMAL_TOPICS
 
+from tests.conftest import MINIMAL_CONFIG, MINIMAL_SOURCES, MINIMAL_TOPICS
 from tg_monitor.config_loader import load_config, load_sources, load_topics
 from tg_monitor.errors import ConfigParseError, ConfigValidationError
 

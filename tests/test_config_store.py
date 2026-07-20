@@ -5,8 +5,8 @@ import time
 from pathlib import Path
 
 import yaml
-from tests.conftest import MINIMAL_SOURCES, MINIMAL_TOPICS, write_valid_config_set
 
+from tests.conftest import MINIMAL_SOURCES, MINIMAL_TOPICS, write_valid_config_set
 from tg_monitor.config_store import ConfigStore
 
 
