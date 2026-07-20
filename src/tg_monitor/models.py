@@ -79,7 +79,7 @@ class LoggingConfig(StrictModel):
     """Логирование — файл + stdout, уровень и таймзона меток времени из конфига — §4."""
 
     level: str = "INFO"
-    file: str = "logs/tg_monitor.log"
+    file: str = "logs/tg-monitor.log"
     timezone: str = "Europe/Riga"
 
 
