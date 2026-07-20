@@ -120,11 +120,11 @@ def test_save_uses_tempfile_and_replace(tmp_path: Path) -> None:
 
     store.save(StateData(last_message_id={"src_a": 2}))
 
-    assert path.read_text(encoding="utf-8")
     loaded = store.load()
     assert loaded.last_message_id == {"src_a": 2}
-    # os.replace на одной ФС гарантирует атомарность; новый файл существует.
-    assert path.stat().st_ino != first_inode or path.exists()
+    # os.replace меняет inode: каждая запись идёт через новый temp-файл,
+    # а не правкой существующего файла на месте.
+    assert path.stat().st_ino != first_inode
 
 
 def test_compute_topic_centroid_version_changes_with_examples() -> None:
