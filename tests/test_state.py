@@ -21,16 +21,19 @@ def test_load_returns_empty_state_when_file_missing(tmp_path: Path) -> None:
     assert state.dedup_buffer == []
 
 
-def test_load_missing_file_logs_error_with_last_message_id_lost(
+def test_load_missing_file_logs_info_not_error(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # §8: файла никогда не было — законный первый запуск, а не потеря
+    # состояния. Уровень ERROR здесь был бы ложной тревогой.
     store = StateStore(tmp_path / "state.json")
 
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.INFO):
         store.load()
 
-    assert any(record.levelno == logging.ERROR for record in caplog.records)
-    assert "last_message_id" in caplog.text
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+    assert any(record.levelno == logging.INFO for record in caplog.records)
+    assert "первый запуск" in caplog.text
 
 
 def test_load_returns_empty_state_when_file_corrupt(tmp_path: Path) -> None:

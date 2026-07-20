@@ -1,3 +1,4 @@
+# ОБРАЗЕЦ — не заполнять, копируй в файл без .example
 # Пример config.yaml — §4 docs/spec.md.
 # Реальный config.yaml в git не попадает (см. .gitignore).
 
@@ -17,6 +18,7 @@ runtime:
   max_post_age_min: 120        # не форвардить старьё после долгого простоя
   rate_limit_per_hour: null    # заготовка, в v1 выключено (§7)
   forward_reposts: true        # репосты внутри источников форвардим как есть
+  media_group_flush_delay_sec: 2.0  # задержка сборки альбома в один пост (пакет 2, Reader)
 
 logging:
   level: INFO

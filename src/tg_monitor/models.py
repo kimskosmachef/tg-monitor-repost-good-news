@@ -114,6 +114,8 @@ class RuntimeConfig(StrictModel):
     max_post_age_min: int = Field(gt=0)
     rate_limit_per_hour: int | None = None
     forward_reposts: bool = True
+    # §4: окно сборки альбома из отдельных событий в один пост.
+    media_group_flush_delay_sec: float = Field(default=2.0, gt=0)
 
 
 class Config(StrictModel):
@@ -128,12 +130,20 @@ class Config(StrictModel):
 
 
 class Post(BaseModel):
-    """Пост источника. В пакете 1 только описан, не заполняется (Reader/Matcher — пакеты 2-3)."""
+    """Нормализованный пост источника — §3, §5.3, дополнено в пакете 2 (Reader)."""
 
-    id: int
+    message_id: int
     source_id: str
     date: dt.datetime
     text: str | None = None
-    media_group_id: int | None = None
+    grouped_id: int | None = None
+    # §7: id всех элементов медиагруппы (для одиночного поста — список из
+    # одного id) — без полного списка групповой форвард невозможен.
+    message_ids: list[int] = Field(default_factory=list)
     is_repost: bool = False
+    has_media: bool = False
     forward_forbidden: bool = False
+    # Reader-диагностика: пост получен через live events.NewMessage или через
+    # периодический добор истории — без этой метки регрессия в подписке на
+    # события (пост едет только доборот) остаётся незаметной по логу.
+    origin: Literal["live", "catchup"]

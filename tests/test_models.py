@@ -100,8 +100,12 @@ def test_topic_facet_empty_examples_rejected() -> None:
         Topic.model_validate(_topic(facets=[{"id": "facet_a", "examples": []}]))
 
 
-def test_post_is_described_but_unpopulated_in_skeleton() -> None:
-    post = Post(id=1, source_id="src_a", date=dt.datetime(2026, 7, 20, 12, 0))
+def test_post_defaults() -> None:
+    post = Post(
+        message_id=1, source_id="src_a", date=dt.datetime(2026, 7, 20, 12, 0), origin="live"
+    )
     assert post.text is None
     assert post.is_repost is False
+    assert post.has_media is False
     assert post.forward_forbidden is False
+    assert post.message_ids == []

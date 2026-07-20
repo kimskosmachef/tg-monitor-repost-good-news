@@ -7,10 +7,17 @@ name = "tg-monitor"
 version = "0.1.0"
 description = "Универсальный монитор Telegram-каналов с тематическим отбором и форвардом"
 requires-python = ">=3.12"
-dynamic = ["dependencies"]
-
-[tool.setuptools.dynamic]
-dependencies = { file = "requirements.txt" }
+# Единственный источник списка зависимостей: requirements.txt содержит
+# только "-e .", ничего не дублирует.
+dependencies = [
+    "pyyaml>=6.0.1",
+    "pydantic>=2.7",
+    "tzdata>=2024.1",
+    "telethon>=1.36",
+    "python-dotenv>=1.0",
+    "ruamel.yaml>=0.18",
+    "qrcode>=7.4",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -59,3 +66,11 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "telethon.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "qrcode.*"
+ignore_missing_imports = true

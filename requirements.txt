@@ -1,3 +1,3 @@
-pyyaml>=6.0.1      # чтение config.yaml / topics.yaml / sources.yaml
-pydantic>=2.7      # валидация конфигов со структурированными ошибками (файл + путь к полю)
-tzdata>=2024.1     # база часовых поясов для zoneinfo (Europe/Riga) — не гарантирована на всех системах
+# Единственный источник списка зависимостей — pyproject.toml ([project.dependencies]).
+# -e . ставит их вместе с пакетом tg_monitor в editable-режиме, без дублирования списка здесь.
+-e .
