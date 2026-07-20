@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 from pathlib import Path
+
+import pytest
 
 from tg_monitor.models import Facet, Topic
 from tg_monitor.state import DedupEntry, StateData, StateStore, compute_topic_centroid_version
@@ -18,6 +21,18 @@ def test_load_returns_empty_state_when_file_missing(tmp_path: Path) -> None:
     assert state.dedup_buffer == []
 
 
+def test_load_missing_file_logs_error_with_last_message_id_lost(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    store = StateStore(tmp_path / "state.json")
+
+    with caplog.at_level(logging.ERROR):
+        store.load()
+
+    assert any(record.levelno == logging.ERROR for record in caplog.records)
+    assert "last_message_id" in caplog.text
+
+
 def test_load_returns_empty_state_when_file_corrupt(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     path.write_text("{not valid json", encoding="utf-8")
@@ -28,6 +43,20 @@ def test_load_returns_empty_state_when_file_corrupt(tmp_path: Path) -> None:
     assert state == StateData()
 
 
+def test_load_corrupt_file_logs_error_with_last_message_id_lost(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    store = StateStore(path)
+
+    with caplog.at_level(logging.ERROR):
+        store.load()
+
+    assert any(record.levelno == logging.ERROR for record in caplog.records)
+    assert "last_message_id" in caplog.text
+
+
 def test_load_returns_empty_state_when_schema_mismatch(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     path.write_text(json.dumps({"last_message_id": "not-a-dict"}), encoding="utf-8")
@@ -36,6 +65,20 @@ def test_load_returns_empty_state_when_schema_mismatch(tmp_path: Path) -> None:
     state = store.load()
 
     assert state == StateData()
+
+
+def test_load_schema_mismatch_logs_error_with_last_message_id_lost(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "state.json"
+    path.write_text(json.dumps({"last_message_id": "not-a-dict"}), encoding="utf-8")
+    store = StateStore(path)
+
+    with caplog.at_level(logging.ERROR):
+        store.load()
+
+    assert any(record.levelno == logging.ERROR for record in caplog.records)
+    assert "last_message_id" in caplog.text
 
 
 def test_save_then_load_roundtrip(tmp_path: Path) -> None:

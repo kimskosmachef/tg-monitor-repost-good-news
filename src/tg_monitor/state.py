@@ -57,25 +57,29 @@ class StateStore:
 
     def load(self) -> StateData:
         if not self._path.exists():
-            self._logger.info("%s не найден, старт с текущего момента", self._path)
+            self._log_state_loss(f"{self._path} не найден")
             return StateData()
         try:
             raw = self._path.read_text(encoding="utf-8")
             data = json.loads(raw)
         except (OSError, json.JSONDecodeError) as exc:
-            self._logger.error(
-                "%s повреждён (%s), старт с текущего момента, буфер дедупа пуст",
-                self._path,
-                exc,
-            )
+            self._log_state_loss(f"{self._path} повреждён ({exc})")
             return StateData()
         try:
             return StateData.model_validate(data)
         except (ValidationError, TypeError) as exc:
-            self._logger.error(
-                "%s не соответствует схеме (%s), старт с текущего момента", self._path, exc
-            )
+            self._log_state_loss(f"{self._path} не соответствует схеме ({exc})")
             return StateData()
+
+    def _log_state_loss(self, reason: str) -> None:
+        # §8: отсутствие/порча state.json — ERROR, last_message_id теряются
+        # по всем источникам, история добора не восстанавливается.
+        # TODO(пакет 6): уведомление в служебный канал (service_chat).
+        self._logger.error(
+            "%s: last_message_id потеряны по всем источникам, старт с текущего момента, "
+            "история добора не восстанавливается",
+            reason,
+        )
 
     def save(self, state: StateData) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
