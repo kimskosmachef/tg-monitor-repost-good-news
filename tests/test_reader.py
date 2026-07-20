@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import os
+import signal
 from pathlib import Path
 
 import pytest
@@ -12,7 +14,7 @@ from tests.conftest import MINIMAL_CONFIG, MINIMAL_TOPICS
 from tests.telethon_fakes import FakeClient, make_message
 from tg_monitor.config_store import ConfigBundle, ConfigStore
 from tg_monitor.models import Post
-from tg_monitor.reader import TelegramReader
+from tg_monitor.reader import TelegramReader, run_with_graceful_shutdown
 from tg_monitor.state import StateStore
 
 FIXED_NOW = dt.datetime(2026, 7, 20, 15, 0, tzinfo=dt.UTC)
@@ -497,6 +499,71 @@ def test_run_connects_subscribes_and_returns_after_disconnect(tmp_path: Path) ->
 
     assert client.connected is True
     assert "src_a" in client.handlers
+
+
+# --- штатная остановка: сигналы не должны ронять процесс трассировкой ------
+
+
+def test_run_cancels_pending_background_tasks_on_shutdown(tmp_path: Path) -> None:
+    client = FakeClient()
+    client.block_until_disconnected = True
+    _link_entity(client, "@a", "entity_a", "src_a")
+    sources = [_source("src_a", "@a")]
+    _write_config_set(tmp_path, sources)
+    config_store = ConfigStore(tmp_path / "config.yaml")
+    state_store = StateStore(tmp_path / "state.json")
+    sink = RecordingSink()
+    reader = TelegramReader(
+        client=client, config_store=config_store, state_store=state_store, sink=sink
+    )
+
+    async def scenario() -> asyncio.Task[None]:
+        run_task = asyncio.create_task(reader.run())
+        await asyncio.sleep(0.05)  # дать run() дойти до run_until_disconnected
+
+        base = dt.datetime(2026, 7, 20, 14, 0, tzinfo=dt.UTC)
+        message = make_message(1, date=base, text="альбом", grouped_id=555)
+        await client.fire_new_message("src_a", message)
+        await asyncio.sleep(0.05)  # флаш-таск создан и ждёт media_group_flush_delay_sec
+        assert reader._live_flush_tasks
+
+        await reader.request_shutdown()
+        await asyncio.wait_for(run_task, timeout=2)
+        return run_task
+
+    run_task = asyncio.run(scenario())
+
+    assert run_task.done()
+    assert run_task.exception() is None
+    assert all(task.done() for task in reader._live_flush_tasks.values())
+
+
+def test_run_with_graceful_shutdown_on_sigterm_logs_and_returns_cleanly(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    client = FakeClient()
+    client.block_until_disconnected = True
+    _link_entity(client, "@a", "entity_a", "src_a")
+    sources = [_source("src_a", "@a")]
+    _write_config_set(tmp_path, sources)
+    config_store = ConfigStore(tmp_path / "config.yaml")
+    state_store = StateStore(tmp_path / "state.json")
+    reader = TelegramReader(
+        client=client, config_store=config_store, state_store=state_store, sink=RecordingSink()
+    )
+
+    async def scenario() -> None:
+        run_task = asyncio.create_task(run_with_graceful_shutdown(reader))
+        await asyncio.sleep(0.05)  # дать обработчикам сигналов установиться
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.wait_for(run_task, timeout=2)
+
+    with caplog.at_level(logging.INFO, logger="tg_monitor.reader"):
+        asyncio.run(scenario())
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("получен сигнал SIGTERM" in m for m in messages)
+    assert any("остановлено штатно" in m for m in messages)
 
 
 def test_flood_wait_during_entity_resolution_is_retried(tmp_path: Path) -> None:

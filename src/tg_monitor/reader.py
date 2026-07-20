@@ -15,6 +15,7 @@ import asyncio
 import datetime as dt
 import functools
 import logging
+import signal
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, Protocol
 from zoneinfo import ZoneInfo
@@ -99,6 +100,8 @@ class TelegramClientLike(Protocol):
     ) -> None: ...
 
     async def run_until_disconnected(self) -> None: ...
+
+    async def disconnect(self) -> None: ...
 
 
 def _text_of(message: Any) -> str | None:
@@ -187,7 +190,29 @@ class TelegramReader:
         try:
             await self._client.run_until_disconnected()
         finally:
-            catchup_task.cancel()
+            await self._cancel_background_tasks(catchup_task)
+
+    async def request_shutdown(self) -> None:
+        """Инициировать штатную остановку: отключает клиента.
+
+        Это разблокирует `run_until_disconnected` в `run()`, где фоновые
+        задачи (добор истории, недофлашенные медиагруппы) будут отменены —
+        см. `_cancel_background_tasks`. Используется `run_with_graceful_shutdown`
+        при SIGINT/SIGTERM.
+        """
+        await self._client.disconnect()
+
+    async def _cancel_background_tasks(self, catchup_task: asyncio.Task[None]) -> None:
+        # §9/CLAUDE.md: при остановке ни одна фоновая задача не должна
+        # повиснуть неотменённой или пропасть молча. Недофлашенные
+        # медиагруппы прерываются — last_message_id для них ещё не
+        # продвинут (§8), следующий добор истории после перезапуска
+        # подхватит их заново, дедуп не даст задвоить публикацию.
+        tasks: list[asyncio.Task[None]] = [catchup_task, *self._live_flush_tasks.values()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _subscribe_active_sources(self, sources: list[Source]) -> None:
         for source in sources:
@@ -420,4 +445,39 @@ class TelegramReader:
             self._client.remove_event_handler(callback, event_filter)
         bundle = self._config_store.get()
         mark_source_unavailable(bundle.sources_path, source_id, self._logger)
-        # TODO(пакет 6): уведомление в служебный канал (service_chat).
+
+
+async def run_with_graceful_shutdown(
+    reader: TelegramReader, log: logging.Logger | None = None
+) -> None:
+    """Оборачивает `TelegramReader.run()` перехватом SIGINT/SIGTERM.
+
+    Под systemd остановка сервиса идёт через SIGTERM. Без обработчика
+    Ctrl+C и `systemctl stop` роняют процесс трассировкой KeyboardInterrupt
+    через `run_until_disconnected`. Обработчик просит Reader отключить
+    клиента — это штатно разблокирует `run_until_disconnected`, а
+    `TelegramReader.run()` доводит остановку фоновых задач до конца
+    (`_cancel_background_tasks`). Второй и последующие сигналы игнорируются:
+    остановка уже идёт.
+    """
+    log = log or logger
+    loop = asyncio.get_running_loop()
+    shutdown_task: asyncio.Task[None] | None = None
+
+    def _on_signal(sig: signal.Signals) -> None:
+        nonlocal shutdown_task
+        if shutdown_task is not None:
+            return
+        log.info("получен сигнал %s, останавливаюсь", sig.name)
+        shutdown_task = loop.create_task(reader.request_shutdown())
+
+    handled_signals = (signal.SIGINT, signal.SIGTERM)
+    for sig in handled_signals:
+        loop.add_signal_handler(sig, functools.partial(_on_signal, sig))
+    try:
+        await reader.run()
+    finally:
+        for sig in handled_signals:
+            loop.remove_signal_handler(sig)
+    log.info("остановлено штатно")
+    # TODO(пакет 6): уведомление в служебный канал (service_chat).

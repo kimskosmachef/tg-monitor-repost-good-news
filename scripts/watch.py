@@ -19,7 +19,7 @@ from telethon import TelegramClient
 
 from tg_monitor.config_store import ConfigStore
 from tg_monitor.logging_setup import setup_logging
-from tg_monitor.reader import LoggingSink, TelegramReader
+from tg_monitor.reader import LoggingSink, TelegramReader, run_with_graceful_shutdown
 from tg_monitor.state import StateStore
 from tg_monitor.telegram_env import load_api_credentials
 
@@ -51,7 +51,7 @@ async def _main() -> None:
         state_store=StateStore(args.state),
         sink=LoggingSink(tz=ZoneInfo(bundle.config.logging.timezone)),
     )
-    await reader.run()
+    await run_with_graceful_shutdown(reader)
 
 
 if __name__ == "__main__":

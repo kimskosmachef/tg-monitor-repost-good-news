@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
@@ -56,6 +57,12 @@ class FakeClient:
         self.iter_error: dict[str, Exception] = {}
         self.handlers: dict[str, list[tuple[Callable[[Any], Awaitable[None]], Any]]] = {}
         self.entity_to_source: dict[str, str] = {}
+        # По умолчанию run_until_disconnected возвращается сразу (нужно
+        # большинству тестов). test-ы Reader.run()/graceful shutdown
+        # включают блокировку явно, имитируя реальный Telethon-клиент,
+        # который висит в run_until_disconnected до disconnect().
+        self.block_until_disconnected = False
+        self._disconnected = asyncio.Event()
 
     async def connect(self) -> None:
         self.connected = True
@@ -110,7 +117,11 @@ class FakeClient:
             ]
 
     async def run_until_disconnected(self) -> None:
-        return None
+        if self.block_until_disconnected:
+            await self._disconnected.wait()
+
+    async def disconnect(self) -> None:
+        self._disconnected.set()
 
     async def fire_new_message(self, source_id: str, message: Message) -> None:
         for callback, _event in self.handlers.get(source_id, []):
