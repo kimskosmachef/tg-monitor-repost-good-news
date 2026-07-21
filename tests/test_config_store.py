@@ -89,6 +89,23 @@ def test_broken_config_yaml_keeps_previous_valid_version(tmp_path: Path) -> None
     assert bundle.config.service_chat == "@tg_monitor_service"
 
 
+def test_examples_file_hot_reload_on_change(tmp_path: Path) -> None:
+    # §4.2, пункт 3 промпта пакета 3.1: правка файла примеров подхватывается
+    # по mtime так же, как правка topics.yaml — без прикосновения к самому
+    # topics.yaml.
+    write_valid_config_set(tmp_path)
+    store = ConfigStore(tmp_path / "config.yaml")
+    assert store.get().topics[0].facets[0].examples == ["пример поста один", "пример поста два"]
+
+    examples_path = tmp_path / "examples" / "facet_a.txt"
+    examples_path.write_text("новый пример один\n---\nновый пример два", encoding="utf-8")
+    _touch_later(examples_path)
+
+    bundle = store.get()
+
+    assert bundle.topics[0].facets[0].examples == ["новый пример один", "новый пример два"]
+
+
 def test_recovers_after_fixing_broken_file(tmp_path: Path) -> None:
     write_valid_config_set(tmp_path)
     store = ConfigStore(tmp_path / "config.yaml")

@@ -179,23 +179,25 @@ def test_save_uses_tempfile_and_replace(tmp_path: Path) -> None:
     assert path.stat().st_ino != first_inode
 
 
+def _facet_with_examples(examples: list[str]) -> Facet:
+    # examples присваивается атрибутом после конструирования, а не через
+    # конструктор — Facet отклоняет инлайн "examples" как входное поле
+    # (§4.2), это делает только config_loader.load_topics() после чтения
+    # файла.
+    facet = Facet(id="f", examples_file="f.txt")
+    facet.examples = examples
+    return facet
+
+
 def test_compute_topic_centroid_version_changes_with_examples() -> None:
-    topic_v1 = Topic(
-        id="t",
-        target="@t",
-        facets=[Facet(id="f", examples=["a", "b"])],
-    )
-    topic_v2 = Topic(
-        id="t",
-        target="@t",
-        facets=[Facet(id="f", examples=["a", "b", "c"])],
-    )
+    topic_v1 = Topic(id="t", target="@t", facets=[_facet_with_examples(["a", "b"])])
+    topic_v2 = Topic(id="t", target="@t", facets=[_facet_with_examples(["a", "b", "c"])])
 
     assert compute_topic_centroid_version(topic_v1) != compute_topic_centroid_version(topic_v2)
 
 
 def test_compute_topic_centroid_version_stable_for_same_examples() -> None:
-    topic = Topic(id="t", target="@t", facets=[Facet(id="f", examples=["a", "b"])])
+    topic = Topic(id="t", target="@t", facets=[_facet_with_examples(["a", "b"])])
 
     assert compute_topic_centroid_version(topic) == compute_topic_centroid_version(topic)
 
@@ -204,7 +206,7 @@ def test_compute_topic_centroid_version_stable_for_same_examples() -> None:
 
 
 def _topic(id_: str, examples: list[str]) -> Topic:
-    return Topic(id=id_, target="@t", facets=[Facet(id="f", examples=examples)])
+    return Topic(id=id_, target="@t", facets=[_facet_with_examples(examples)])
 
 
 def _state_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:

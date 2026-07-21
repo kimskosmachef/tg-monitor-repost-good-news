@@ -28,3 +28,7 @@ models/
 config/config.yaml
 config/topics.yaml
 config/sources.yaml
+
+# реальные файлы примеров граней/негативов (§4.2) — рабочие данные, не образцы
+config/examples/*.txt
+!config/examples/*.example.txt

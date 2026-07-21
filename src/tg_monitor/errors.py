@@ -31,6 +31,15 @@ class ConfigValidationError(ConfigError):
         super().__init__(f"{path}: {details}")
 
 
+class ExamplesFileError(ConfigError):
+    """Файл примеров/негативов (§4.2) не читается или (для примеров) пуст."""
+
+    def __init__(self, path: Path, reason: str) -> None:
+        self.path = path
+        self.reason = reason
+        super().__init__(f"{path}: {reason}")
+
+
 def _format_pydantic_error(err: ErrorDetails) -> str:
     loc = ".".join(str(part) for part in err["loc"]) if err["loc"] else "<root>"
     return f"{loc}: {err['msg']}"
