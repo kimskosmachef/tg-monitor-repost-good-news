@@ -58,10 +58,18 @@ class Source(StrictModel):
 
 
 class Facet(StrictModel):
-    """Грань темы со своим набором примеров и центроидом — §5.1."""
+    """Грань темы со своим набором примеров и центроидом — §5.1, §4.2.
+
+    `examples_file` — путь к текстовому файлу примеров (§4.2), разрешается
+    относительно каталога `topics.yaml`. `examples` — уже загруженное из
+    этого файла содержимое: не часть схемы `topics.yaml`, заполняется
+    `config_loader.load_topics()` после чтения файла, поэтому исключено из
+    сериализации (`exclude=True`) и не валидируется как входное поле.
+    """
 
     id: str
-    examples: list[str] = Field(min_length=1)
+    examples_file: str
+    examples: list[str] = Field(default_factory=list, exclude=True)
 
 
 class Topic(StrictModel):
@@ -76,25 +84,33 @@ class Topic(StrictModel):
     soft_threshold: float = DEFAULT_SOFT_THRESHOLD
     chunk_strategy: ChunkStrategy = "paragraph"
     facets: list[Facet] = Field(min_length=1)
-    negatives: list[str] = Field(default_factory=list)
+    # §4.2: негативы опциональны на уровне темы — отсутствие поля означает
+    # отсутствие второго центроида (§5.4), а не ошибку.
+    negatives_file: str | None = None
+    # Загружено из negatives_file config_loader'ом — см. docstring Facet.examples.
+    negatives: list[str] = Field(default_factory=list, exclude=True)
 
-    @model_validator(mode="after")
-    def _warn_facets_below_recommended_examples(self) -> Topic:
-        # §5.1: число примеров в грани — рекомендация, не валидация, по тому
-        # же правилу, что и boost в §5.6: грань с малым числом примеров
-        # загружается, но пишет предупреждение с id темы и грани.
-        # Пустая грань (0 примеров) — ошибка конфига, отсекается на уровне
-        # Facet.examples (min_length=1) до этой проверки.
-        for facet in self.facets:
-            if len(facet.examples) < FACET_MIN_EXAMPLES:
-                logger.warning(
-                    "тема %s, грань %s: %d примеров меньше рекомендованных %d",
-                    self.id,
-                    facet.id,
-                    len(facet.examples),
-                    FACET_MIN_EXAMPLES,
-                )
-        return self
+
+def warn_if_facet_examples_below_recommended(
+    topic_id: str, facet_id: str, examples_file: str, examples: list[str]
+) -> None:
+    """Предупредить, если у грани меньше рекомендованных примеров — §5.1, §4.2.
+
+    Число примеров — рекомендация, а не валидация (тот же принцип, что и у
+    `boost` в §5.6), поэтому грань всё равно загружается. Вызывается
+    `config_loader.load_topics()` после чтения `examples_file`: до этого
+    момента число примеров неизвестно, оно приходит из файла, а не из
+    `topics.yaml`.
+    """
+    if len(examples) < FACET_MIN_EXAMPLES:
+        logger.warning(
+            "тема %s, грань %s (%s): %d примеров меньше рекомендованных %d",
+            topic_id,
+            facet_id,
+            examples_file,
+            len(examples),
+            FACET_MIN_EXAMPLES,
+        )
 
 
 class AccountConfig(StrictModel):

@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
+import yaml
 
-from tests.conftest import MINIMAL_CONFIG, MINIMAL_SOURCES, MINIMAL_TOPICS
-from tg_monitor.config_loader import load_config, load_sources, load_topics
-from tg_monitor.errors import ConfigParseError, ConfigValidationError
+from tests.conftest import (
+    MINIMAL_CONFIG,
+    MINIMAL_EXAMPLES,
+    MINIMAL_SOURCES,
+    MINIMAL_TOPICS,
+    write_examples_files,
+)
+from tg_monitor.config_loader import load_config, load_sources, load_topics, parse_examples_text
+from tg_monitor.errors import ConfigParseError, ConfigValidationError, ExamplesFileError
 
 
 def test_load_config_valid(tmp_path: Path) -> None:
-    import yaml
-
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(MINIMAL_CONFIG), encoding="utf-8")
 
@@ -22,8 +28,6 @@ def test_load_config_valid(tmp_path: Path) -> None:
 
 
 def test_load_config_missing_field_reports_file_and_path(tmp_path: Path) -> None:
-    import yaml
-
     broken = dict(MINIMAL_CONFIG)
     del broken["service_chat"]
     path = tmp_path / "config.yaml"
@@ -38,8 +42,6 @@ def test_load_config_missing_field_reports_file_and_path(tmp_path: Path) -> None
 
 
 def test_load_config_wrong_type_reports_nested_path(tmp_path: Path) -> None:
-    import yaml
-
     broken = {**MINIMAL_CONFIG, "runtime": {**MINIMAL_CONFIG["runtime"], "dedup_threshold": "n/a"}}  # type: ignore[dict-item]
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(broken), encoding="utf-8")
@@ -63,10 +65,9 @@ def test_load_config_invalid_yaml_syntax(tmp_path: Path) -> None:
 
 
 def test_load_topics_valid(tmp_path: Path) -> None:
-    import yaml
-
     path = tmp_path / "topics.yaml"
     path.write_text(yaml.safe_dump(MINIMAL_TOPICS), encoding="utf-8")
+    write_examples_files(tmp_path, MINIMAL_EXAMPLES)
 
     topics = load_topics(path)
 
@@ -75,50 +76,105 @@ def test_load_topics_valid(tmp_path: Path) -> None:
     assert topics[0].facets[0].examples == ["пример поста один", "пример поста два"]
 
 
-def test_load_topics_empty_facet_examples_rejected(tmp_path: Path) -> None:
-    import yaml
-
-    broken = [{**MINIMAL_TOPICS[0], "facets": [{"id": "facet_a", "examples": []}]}]
+def test_load_topics_missing_examples_file_rejected(tmp_path: Path) -> None:
+    missing_facet = {"id": "facet_a", "examples_file": "examples/missing.txt"}
+    broken = [{**MINIMAL_TOPICS[0], "facets": [missing_facet]}]
     path = tmp_path / "topics.yaml"
     path.write_text(yaml.safe_dump(broken), encoding="utf-8")
 
-    with pytest.raises(ConfigValidationError) as exc_info:
+    with pytest.raises(ExamplesFileError) as exc_info:
         load_topics(path)
 
     message = str(exc_info.value)
-    assert str(path) in message
-    assert "facets" in message
+    assert str(tmp_path / "examples" / "missing.txt") in message
+
+
+def test_load_topics_empty_examples_file_rejected(tmp_path: Path) -> None:
+    broken = [
+        {**MINIMAL_TOPICS[0], "facets": [{"id": "facet_a", "examples_file": "examples/empty.txt"}]}
+    ]
+    path = tmp_path / "topics.yaml"
+    path.write_text(yaml.safe_dump(broken), encoding="utf-8")
+    write_examples_files(tmp_path, {"examples/empty.txt": []})
+
+    with pytest.raises(ExamplesFileError) as exc_info:
+        load_topics(path)
+
+    message = str(exc_info.value)
+    assert str(tmp_path / "examples" / "empty.txt") in message
 
 
 def test_load_topics_facet_below_recommended_examples_accepted_with_warning(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    import logging
-
-    import yaml
-
-    few_examples = [
-        {
-            **MINIMAL_TOPICS[0],
-            "facets": [{"id": "facet_a", "examples": ["один пример"]}],
-        }
-    ]
     path = tmp_path / "topics.yaml"
-    path.write_text(yaml.safe_dump(few_examples), encoding="utf-8")
+    path.write_text(yaml.safe_dump(MINIMAL_TOPICS), encoding="utf-8")
+    write_examples_files(tmp_path, {"examples/facet_a.txt": ["один пример"]})
 
     with caplog.at_level(logging.WARNING, logger="tg_monitor.models"):
         topics = load_topics(path)
 
     assert topics[0].facets[0].examples == ["один пример"]
     assert any(
-        "topic_one" in record.getMessage() and "facet_a" in record.getMessage()
+        "topic_one" in record.getMessage()
+        and "facet_a" in record.getMessage()
+        and "facet_a.txt" in record.getMessage()
         for record in caplog.records
     )
 
 
-def test_load_sources_valid(tmp_path: Path) -> None:
-    import yaml
+def test_load_topics_negatives_file_empty_is_not_an_error(tmp_path: Path) -> None:
+    topic = {**MINIMAL_TOPICS[0], "negatives_file": "examples/negatives.txt"}
+    path = tmp_path / "topics.yaml"
+    path.write_text(yaml.safe_dump([topic]), encoding="utf-8")
+    write_examples_files(tmp_path, {**MINIMAL_EXAMPLES, "examples/negatives.txt": []})
 
+    topics = load_topics(path)
+
+    assert topics[0].negatives == []
+
+
+def test_load_topics_missing_negatives_file_rejected(tmp_path: Path) -> None:
+    topic = {**MINIMAL_TOPICS[0], "negatives_file": "examples/missing_negatives.txt"}
+    path = tmp_path / "topics.yaml"
+    path.write_text(yaml.safe_dump([topic]), encoding="utf-8")
+    write_examples_files(tmp_path, MINIMAL_EXAMPLES)
+
+    with pytest.raises(ExamplesFileError) as exc_info:
+        load_topics(path)
+
+    message = str(exc_info.value)
+    assert str(tmp_path / "examples" / "missing_negatives.txt") in message
+
+
+# --- parse_examples_text: разделитель и крайние случаи, пункт 7 -------------
+
+
+def test_parse_examples_text_splits_on_separator_and_strips() -> None:
+    raw = "  первый пример  \n---\nвторой пример"
+    assert parse_examples_text(raw) == ["первый пример", "второй пример"]
+
+
+def test_parse_examples_text_separator_as_first_line() -> None:
+    raw = "---\nединственный пример"
+    assert parse_examples_text(raw) == ["единственный пример"]
+
+
+def test_parse_examples_text_consecutive_separators_skip_empty_entry() -> None:
+    raw = "первый\n---\n---\nвторой"
+    assert parse_examples_text(raw) == ["первый", "второй"]
+
+
+def test_parse_examples_text_without_trailing_newline() -> None:
+    raw = "первый\n---\nвторой без переноса строки в конце"
+    assert parse_examples_text(raw) == ["первый", "второй без переноса строки в конце"]
+
+
+def test_parse_examples_text_empty_file_has_no_entries() -> None:
+    assert parse_examples_text("") == []
+
+
+def test_load_sources_valid(tmp_path: Path) -> None:
     path = tmp_path / "sources.yaml"
     path.write_text(yaml.safe_dump(MINIMAL_SOURCES), encoding="utf-8")
 
@@ -131,10 +187,6 @@ def test_load_sources_valid(tmp_path: Path) -> None:
 def test_load_sources_boost_out_of_range_accepted_with_warning(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    import logging
-
-    import yaml
-
     above_max = [{**MINIMAL_SOURCES[0], "boost": 0.5}]
     path = tmp_path / "sources.yaml"
     path.write_text(yaml.safe_dump(above_max), encoding="utf-8")

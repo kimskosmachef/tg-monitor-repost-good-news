@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import os
+import time
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -10,6 +12,7 @@ import numpy as np
 import pytest
 import yaml
 
+from tests.conftest import write_examples_files
 from tg_monitor.config_store import ConfigStore
 from tg_monitor.embedder import Vector
 from tg_monitor.matcher import CentroidStore, Matcher, MatchingSink
@@ -64,13 +67,20 @@ def _topic(
     soft_threshold: float = 0.2,
     sources: str | list[str] = "all",
 ) -> Topic:
+    # Строится напрямую в Python, а не через load_topics — файлы примеров
+    # (§4.2) сюда не нужны, examples_file здесь чисто номинален (для тестов
+    # CentroidStore, которые не читают файлы с диска).
     return Topic(
         id=id_,
         target="@target",
         sources=sources,
         threshold=threshold,
         soft_threshold=soft_threshold,
-        facets=[Facet(id=fid, examples=examples) for fid, examples in facets],
+        facets=[
+            Facet(id=fid, examples_file=f"{fid}.txt", examples=list(examples))
+            for fid, examples in facets
+        ],
+        negatives_file="negatives.txt" if negatives else None,
         negatives=list(negatives),
     )
 
@@ -114,6 +124,7 @@ def _write_configs(
 
 
 def _topic_dict(
+    tmp_path: Path,
     id_: str = "t",
     facets: dict[str, list[str]] | None = None,
     negatives: list[str] | None = None,
@@ -121,17 +132,27 @@ def _topic_dict(
     soft_threshold: float = 0.2,
     sources: str | list[str] = "all",
 ) -> dict[str, object]:
+    """Собрать словарь темы для topics.yaml, записав файлы примеров/негативов (§4.2) на диск."""
     facets = facets or {"f1": ["пример а"]}
-    return {
+    facet_entries: list[dict[str, object]] = []
+    for fid, examples in facets.items():
+        rel_path = f"examples/{id_}_{fid}.txt"
+        write_examples_files(tmp_path, {rel_path: examples})
+        facet_entries.append({"id": fid, "examples_file": rel_path})
+    topic: dict[str, object] = {
         "id": id_,
         "target": "@target",
         "sources": sources,
         "threshold": threshold,
         "soft_threshold": soft_threshold,
         "chunk_strategy": "paragraph",
-        "facets": [{"id": fid, "examples": examples} for fid, examples in facets.items()],
-        "negatives": negatives or [],
+        "facets": facet_entries,
     }
+    if negatives:
+        rel_path = f"examples/{id_}_negatives.txt"
+        write_examples_files(tmp_path, {rel_path: negatives})
+        topic["negatives_file"] = rel_path
+    return topic
 
 
 def _source_dict(id_: str, boost: float = 0.0) -> dict[str, object]:
@@ -186,12 +207,42 @@ def test_centroid_store_recomputes_when_examples_change() -> None:
     assert second.version != first.version
 
 
+def _touch_later(path: Path) -> None:
+    """Гарантировать, что mtime строго больше предыдущего (устойчиво к грубому разрешению ФС)."""
+    current = path.stat().st_mtime
+    new_mtime = max(current + 1, time.time() + 1)
+    os.utime(path, (new_mtime, new_mtime))
+
+
+def test_matcher_recomputes_centroid_when_examples_file_changes(tmp_path: Path) -> None:
+    # §4.2, пункт 3 промпта пакета 3.1: правка файла примеров подхватывается
+    # по mtime и пересчитывает центроид темы — без прикосновения к самому
+    # topics.yaml, как правка любого другого отслеживаемого конфига.
+    topics = [_topic_dict(tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5)]
+    config_store = _write_configs(tmp_path, topics)
+    embedder = DictEmbedder({"пример а": (1, 0), "пример б": (0, 1), "текст поста": (0, 1)})
+    matcher = Matcher(embedder=embedder, config_store=config_store)
+
+    before = matcher.score_post(_post("текст поста"))
+    assert before == []  # cos("текст поста", "пример а") = 0, порог 0.5 не пройден
+
+    examples_path = tmp_path / "examples" / "t1_facet_a.txt"
+    examples_path.write_text("пример б", encoding="utf-8")
+    _touch_later(examples_path)
+
+    after = matcher.score_post(_post("текст поста"))
+
+    assert len(after) == 1
+    assert after[0].raw_score == pytest.approx(1.0)
+
+
 # --- Matcher: максимум по граням, пункт 5 ------------------------------------
 
 
 def test_matcher_picks_max_scoring_facet(tmp_path: Path) -> None:
     topics = [
         _topic_dict(
+            tmp_path,
             id_="t1",
             facets={"facet_a": ["пример а"], "facet_b": ["пример б"]},
             threshold=0.5,
@@ -213,7 +264,7 @@ def test_matcher_picks_max_scoring_facet(tmp_path: Path) -> None:
 
 
 def test_matcher_takes_max_over_chunks_not_average(tmp_path: Path) -> None:
-    topics = [_topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5)]
+    topics = [_topic_dict(tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5)]
     config_store = _write_configs(tmp_path, topics)
     # Абзацы длиной >=1 символ (min_chunk_chars=1) не клеятся — остаются двумя
     # чанками: один противоположен грани (cos=-1), другой совпадает (cos=1).
@@ -234,6 +285,7 @@ def test_matcher_takes_max_over_chunks_not_average(tmp_path: Path) -> None:
 def test_matcher_negative_example_suppresses_false_positive(tmp_path: Path) -> None:
     topics = [
         _topic_dict(
+            tmp_path,
             id_="t1",
             facets={"facet_a": ["позитивный пример"]},
             negatives=["негативный пример"],
@@ -261,6 +313,7 @@ def test_matcher_negative_example_suppresses_false_positive(tmp_path: Path) -> N
 def test_matcher_passes_when_far_from_negative(tmp_path: Path) -> None:
     topics = [
         _topic_dict(
+            tmp_path,
             id_="t1",
             facets={"facet_a": ["позитивный пример"]},
             negatives=["негативный пример"],
@@ -287,7 +340,7 @@ def test_matcher_passes_when_far_from_negative(tmp_path: Path) -> None:
 
 
 def test_matcher_applies_boost_and_logs_raw_separately(tmp_path: Path) -> None:
-    topics = [_topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5)]
+    topics = [_topic_dict(tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5)]
     sources = [_source_dict("src_a", boost=0.05)]
     config_store = _write_configs(tmp_path, topics, sources)
     embedder = DictEmbedder({"пример а": (1, 0), "текст поста": (1, 0)})
@@ -304,7 +357,7 @@ def test_matcher_applies_boost_and_logs_raw_separately(tmp_path: Path) -> None:
 def test_matcher_boxed_mode_decides_on_final_score(tmp_path: Path) -> None:
     # threshold=1.02 недостижим сырым score (максимум 1.0 при идеальном
     # совпадении), но final_score = raw + boost его превышает.
-    topics = [_topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=1.02)]
+    topics = [_topic_dict(tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=1.02)]
     sources = [_source_dict("src_a", boost=0.05)]
     config_store = _write_configs(tmp_path, topics, sources)
     embedder = DictEmbedder({"пример а": (1, 0), "текст поста": (1, 0)})
@@ -321,7 +374,9 @@ def test_matcher_boxed_mode_decides_on_final_score(tmp_path: Path) -> None:
 
 def test_matcher_shadow_mode_uses_soft_threshold(tmp_path: Path) -> None:
     topics = [
-        _topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=None, soft_threshold=0.5)
+        _topic_dict(
+            tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=None, soft_threshold=0.5
+        )
     ]
     config_store = _write_configs(tmp_path, topics)
     # cos(45°) ≈ 0.707 > soft_threshold=0.5.
@@ -339,7 +394,9 @@ def test_matcher_shadow_mode_ignores_boost_in_decision(tmp_path: Path) -> None:
     # чтобы final_score его превысил — §5.6: "boost не применяется при
     # калибровке порога". Пост не должен пройти.
     topics = [
-        _topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=None, soft_threshold=0.9)
+        _topic_dict(
+            tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=None, soft_threshold=0.9
+        )
     ]
     sources = [_source_dict("src_a", boost=0.5)]
     config_store = _write_configs(tmp_path, topics, sources)
@@ -355,7 +412,7 @@ def test_matcher_shadow_mode_ignores_boost_in_decision(tmp_path: Path) -> None:
 
 
 def test_matcher_skips_post_without_text(tmp_path: Path) -> None:
-    topics = [_topic_dict(id_="t1", threshold=0.0)]
+    topics = [_topic_dict(tmp_path, id_="t1", threshold=0.0)]
     config_store = _write_configs(tmp_path, topics)
     embedder = DictEmbedder({"пример а": (1, 0)})
     matcher = Matcher(embedder=embedder, config_store=config_store)
@@ -368,7 +425,9 @@ def test_matcher_skips_post_without_text(tmp_path: Path) -> None:
 
 def test_matcher_skips_topic_when_source_not_in_scope(tmp_path: Path) -> None:
     topics = [
-        _topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.0, sources=["src_b"])
+        _topic_dict(
+            tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.0, sources=["src_b"]
+        )
     ]
     config_store = _write_configs(tmp_path, topics)
     embedder = DictEmbedder({"пример а": (1, 0), "текст поста": (1, 0)})
@@ -381,8 +440,8 @@ def test_matcher_skips_topic_when_source_not_in_scope(tmp_path: Path) -> None:
 
 def test_matcher_one_post_can_pass_several_topics(tmp_path: Path) -> None:
     topics = [
-        _topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5),
-        _topic_dict(id_="t2", facets={"facet_a": ["пример а"]}, threshold=0.5),
+        _topic_dict(tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5),
+        _topic_dict(tmp_path, id_="t2", facets={"facet_a": ["пример а"]}, threshold=0.5),
     ]
     config_store = _write_configs(tmp_path, topics)
     embedder = DictEmbedder({"пример а": (1, 0), "текст поста": (1, 0)})
@@ -406,8 +465,8 @@ class RecordingSink:
 
 def test_matching_sink_forwards_matched_post_once(tmp_path: Path) -> None:
     topics = [
-        _topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5),
-        _topic_dict(id_="t2", facets={"facet_a": ["пример а"]}, threshold=0.5),
+        _topic_dict(tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5),
+        _topic_dict(tmp_path, id_="t2", facets={"facet_a": ["пример а"]}, threshold=0.5),
     ]
     config_store = _write_configs(tmp_path, topics)
     embedder = DictEmbedder({"пример а": (1, 0), "текст поста": (1, 0)})
@@ -423,7 +482,7 @@ def test_matching_sink_forwards_matched_post_once(tmp_path: Path) -> None:
 def test_matching_sink_does_not_forward_unmatched_post(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    topics = [_topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.99)]
+    topics = [_topic_dict(tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.99)]
     config_store = _write_configs(tmp_path, topics)
     embedder = DictEmbedder({"пример а": (1, 0), "текст поста": (0, 1)})
     matcher = Matcher(embedder=embedder, config_store=config_store)
@@ -447,7 +506,7 @@ def test_matching_sink_does_not_forward_unmatched_post(
 def test_matching_sink_does_not_forward_post_without_text(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    topics = [_topic_dict(id_="t1")]
+    topics = [_topic_dict(tmp_path, id_="t1")]
     config_store = _write_configs(tmp_path, topics)
     embedder = DictEmbedder({"пример а": (1, 0)})
     matcher = Matcher(embedder=embedder, config_store=config_store)
@@ -479,7 +538,7 @@ class FailingEmbedder:
 def test_matching_sink_swallows_embedder_error_and_marks_post_handled(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    topics = [_topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5)]
+    topics = [_topic_dict(tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5)]
     config_store = _write_configs(tmp_path, topics)
     matcher = Matcher(embedder=FailingEmbedder(), config_store=config_store)
     downstream = RecordingSink()
@@ -522,7 +581,7 @@ class CentroidFailingEmbedder:
 def test_matching_sink_logs_honest_reason_for_non_embedder_scoring_error(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    topics = [_topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5)]
+    topics = [_topic_dict(tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5)]
     config_store = _write_configs(tmp_path, topics)
     embedder = CentroidFailingEmbedder("текст поста", _unit(1, 0))
     matcher = Matcher(embedder=embedder, config_store=config_store)

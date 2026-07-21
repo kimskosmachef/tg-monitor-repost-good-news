@@ -27,10 +27,15 @@ MINIMAL_TOPICS: list[dict[str, object]] = [
         "sources": "all",
         "threshold": None,
         "chunk_strategy": "paragraph",
-        "facets": [{"id": "facet_a", "examples": ["пример поста один", "пример поста два"]}],
-        "negatives": [],
+        "facets": [{"id": "facet_a", "examples_file": "examples/facet_a.txt"}],
     }
 ]
+
+# Содержимое файлов примеров (§4.2), на которые ссылается MINIMAL_TOPICS —
+# путь относительно каталога topics.yaml.
+MINIMAL_EXAMPLES: dict[str, list[str]] = {
+    "examples/facet_a.txt": ["пример поста один", "пример поста два"],
+}
 
 MINIMAL_SOURCES: list[dict[str, object]] = [
     {
@@ -45,7 +50,16 @@ MINIMAL_SOURCES: list[dict[str, object]] = [
 ]
 
 
+def write_examples_files(directory: Path, files: dict[str, list[str]]) -> None:
+    """Записать файлы примеров/негативов (§4.2), пути — относительно `directory`."""
+    for rel_path, entries in files.items():
+        path = directory / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n---\n".join(entries), encoding="utf-8")
+
+
 def write_valid_config_set(directory: Path) -> None:
     (directory / "config.yaml").write_text(yaml.safe_dump(MINIMAL_CONFIG), encoding="utf-8")
     (directory / "topics.yaml").write_text(yaml.safe_dump(MINIMAL_TOPICS), encoding="utf-8")
     (directory / "sources.yaml").write_text(yaml.safe_dump(MINIMAL_SOURCES), encoding="utf-8")
+    write_examples_files(directory, MINIMAL_EXAMPLES)

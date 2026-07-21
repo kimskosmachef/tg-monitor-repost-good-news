@@ -14,3 +14,7 @@ cp config/topics.example.yaml config/topics.yaml
 ```
 
 Формат каждого файла — §4 и §4.1 `docs/spec.md`.
+
+Примеры граней и негативы (`examples_file`/`negatives_file` в `topics.yaml`)
+живут в `config/examples/*.txt` — формат §4.2. Образцы — `config/examples/*.example.txt`,
+реальные файлы создаются копированием (без `.example` в имени) и в git не попадают.

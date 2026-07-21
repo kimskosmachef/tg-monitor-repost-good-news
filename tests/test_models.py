@@ -6,7 +6,7 @@ import logging
 import pytest
 from pydantic import ValidationError
 
-from tg_monitor.models import FACET_MIN_EXAMPLES, Post, Source, Topic
+from tg_monitor.models import Facet, Post, Source, Topic
 
 
 def _source(**overrides: object) -> dict[str, object]:
@@ -23,7 +23,7 @@ def _topic(**overrides: object) -> dict[str, object]:
     base: dict[str, object] = {
         "id": "topic_one",
         "target": "@target_channel_one",
-        "facets": [{"id": "facet_a", "examples": ["один пример"]}],
+        "facets": [{"id": "facet_a", "examples_file": "facet_a.txt"}],
     }
     base.update(overrides)
     return base
@@ -69,35 +69,33 @@ def test_source_defaults() -> None:
     assert source.note == ""
 
 
-def test_topic_facet_below_recommended_examples_is_accepted_with_warning(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    with caplog.at_level(logging.WARNING, logger="tg_monitor.models"):
-        topic = Topic.model_validate(
-            _topic(facets=[{"id": "facet_a", "examples": ["один", "два"]}])
-        )
-
-    assert len(topic.facets[0].examples) == 2
-    assert any(
-        "topic_one" in record.getMessage() and "facet_a" in record.getMessage()
-        for record in caplog.records
-    )
-
-
-def test_topic_facet_at_recommended_examples_is_accepted_without_warning(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    examples = [f"пример {i}" for i in range(FACET_MIN_EXAMPLES)]
-    with caplog.at_level(logging.WARNING, logger="tg_monitor.models"):
-        topic = Topic.model_validate(_topic(facets=[{"id": "facet_a", "examples": examples}]))
-
-    assert len(topic.facets[0].examples) == FACET_MIN_EXAMPLES
-    assert caplog.records == []
-
-
-def test_topic_facet_empty_examples_rejected() -> None:
+def test_topic_facet_requires_examples_file() -> None:
+    # examples (§4.2) больше не часть схемы topics.yaml — только путь к
+    # файлу; число примеров и предупреждение о нём теперь на стороне
+    # config_loader.load_topics(), см. tests/test_config_loader.py.
     with pytest.raises(ValidationError):
-        Topic.model_validate(_topic(facets=[{"id": "facet_a", "examples": []}]))
+        Topic.model_validate(_topic(facets=[{"id": "facet_a"}]))
+
+
+def test_topic_requires_at_least_one_facet() -> None:
+    with pytest.raises(ValidationError):
+        Topic.model_validate(_topic(facets=[]))
+
+
+def test_topic_facet_rejects_inline_examples() -> None:
+    # Старый формат (инлайн-список) — не просто необязателен, а ошибка:
+    # "examples" больше не поле схемы, а "examples_file" всё равно
+    # обязателен и не заменяется присутствием "examples".
+    with pytest.raises(ValidationError):
+        Topic.model_validate(_topic(facets=[{"id": "facet_a", "examples": ["один пример"]}]))
+
+
+def test_facet_examples_loaded_field_not_required_and_excluded_from_dump() -> None:
+    # `examples` заполняется config_loader'ом после чтения файла (§4.2),
+    # это не часть входной схемы — по умолчанию пуст и не сериализуется.
+    facet = Facet.model_validate({"id": "facet_a", "examples_file": "facet_a.txt"})
+    assert facet.examples == []
+    assert "examples" not in facet.model_dump()
 
 
 def test_post_defaults() -> None:

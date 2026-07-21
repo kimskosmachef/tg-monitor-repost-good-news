@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tests.conftest import MINIMAL_CONFIG, MINIMAL_TOPICS
+from tests.conftest import MINIMAL_CONFIG, MINIMAL_EXAMPLES, MINIMAL_TOPICS, write_examples_files
 from tests.telethon_fakes import FakeClient, make_message
 from tg_monitor.config_store import ConfigBundle, ConfigStore
 from tg_monitor.models import Post
@@ -36,6 +36,7 @@ def _write_config_set(tmp_path: Path, sources: list[dict[str, object]]) -> None:
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(MINIMAL_CONFIG), encoding="utf-8")
     (tmp_path / "topics.yaml").write_text(yaml.safe_dump(MINIMAL_TOPICS), encoding="utf-8")
     (tmp_path / "sources.yaml").write_text(yaml.safe_dump(sources), encoding="utf-8")
+    write_examples_files(tmp_path, MINIMAL_EXAMPLES)
 
 
 class RecordingSink:

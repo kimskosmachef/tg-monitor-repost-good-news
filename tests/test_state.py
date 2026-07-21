@@ -183,19 +183,21 @@ def test_compute_topic_centroid_version_changes_with_examples() -> None:
     topic_v1 = Topic(
         id="t",
         target="@t",
-        facets=[Facet(id="f", examples=["a", "b"])],
+        facets=[Facet(id="f", examples_file="f.txt", examples=["a", "b"])],
     )
     topic_v2 = Topic(
         id="t",
         target="@t",
-        facets=[Facet(id="f", examples=["a", "b", "c"])],
+        facets=[Facet(id="f", examples_file="f.txt", examples=["a", "b", "c"])],
     )
 
     assert compute_topic_centroid_version(topic_v1) != compute_topic_centroid_version(topic_v2)
 
 
 def test_compute_topic_centroid_version_stable_for_same_examples() -> None:
-    topic = Topic(id="t", target="@t", facets=[Facet(id="f", examples=["a", "b"])])
+    topic = Topic(
+        id="t", target="@t", facets=[Facet(id="f", examples_file="f.txt", examples=["a", "b"])]
+    )
 
     assert compute_topic_centroid_version(topic) == compute_topic_centroid_version(topic)
 
@@ -204,7 +206,9 @@ def test_compute_topic_centroid_version_stable_for_same_examples() -> None:
 
 
 def _topic(id_: str, examples: list[str]) -> Topic:
-    return Topic(id=id_, target="@t", facets=[Facet(id="f", examples=examples)])
+    return Topic(
+        id=id_, target="@t", facets=[Facet(id="f", examples_file="f.txt", examples=examples)]
+    )
 
 
 def _state_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
