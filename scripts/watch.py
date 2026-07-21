@@ -25,7 +25,12 @@ from tg_monitor.embedder import SentenceTransformerEmbedder
 from tg_monitor.logging_setup import setup_logging
 from tg_monitor.matcher import Matcher, MatchingSink
 from tg_monitor.reader import LoggingSink, TelegramReader, run_with_graceful_shutdown
-from tg_monitor.state import StateStore, reconcile_topic_centroid_versions
+from tg_monitor.state import (
+    DedupBufferStore,
+    StateStore,
+    default_dedup_buffer_path,
+    reconcile_topic_centroid_versions,
+)
 from tg_monitor.telegram_env import load_api_credentials
 
 logger = logging.getLogger(__name__)
@@ -60,22 +65,24 @@ async def _main() -> None:
     matcher = Matcher(embedder=embedder, config_store=config_store)
 
     # §8 v1.9: state.json читается один раз здесь — сверка версий центроидов
-    # идёт по этому же объекту, который затем передаётся в Reader и
-    # Deduplicator как есть, без повторного чтения с диска (было хрупко:
-    # порядок load() в watch.py и в Reader имел значение сам по себе). Оба
-    # компонента делят один объект `state` и один `StateStore`, независимо
-    # сохраняя его при своих изменениях (last_message_id и dedup_buffer
-    # соответственно).
+    # идёт по этому же объекту, который затем передаётся в Reader как есть,
+    # без повторного чтения с диска (было хрупко: порядок load() в watch.py
+    # и в Reader имел значение сам по себе).
     state_store = StateStore(args.state)
     state = state_store.load()
     reconcile_topic_centroid_versions(state, bundle.topics, logger)
     state_store.save(state)
 
+    # §8 v2.2: буфер дедупа — отдельный файл рядом со state.json, путь не
+    # заводится отдельным параметром запуска, а выводится из --state.
+    buffer_store = DedupBufferStore(default_dedup_buffer_path(args.state))
+    buffer = buffer_store.load()
+
     # Reader → MatchingSink (§5) → Deduplicator (§6) → LoggingSink.
     deduplicator = Deduplicator(
         config_store=config_store,
-        state_store=state_store,
-        state=state,
+        buffer_store=buffer_store,
+        buffer=buffer,
         sink=LoggingSink(tz=ZoneInfo(bundle.config.logging.timezone)),
     )
     matching_sink = MatchingSink(matcher=matcher, sink=deduplicator)

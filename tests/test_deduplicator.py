@@ -15,7 +15,7 @@ from tg_monitor.deduplicator import Deduplicator
 from tg_monitor.embedder import Vector
 from tg_monitor.matcher import MatchResult
 from tg_monitor.models import Post
-from tg_monitor.state import DedupEntry, StateData, StateStore
+from tg_monitor.state import DedupBufferData, DedupBufferStore, DedupEntry
 
 FIXED_DATE = dt.datetime(2026, 7, 20, 12, 0, tzinfo=dt.UTC)
 
@@ -89,31 +89,31 @@ def _clock(*values: dt.datetime) -> Callable[[], dt.datetime]:
 
 def _make_dedup(
     tmp_path: Path,
-    state: StateData | None = None,
+    buffer: DedupBufferData | None = None,
     window_hours: int = 48,
     threshold: float = 0.85,
     now: Callable[[], dt.datetime] | None = None,
     sink: RecordingSink | None = None,
-) -> tuple[Deduplicator, ConfigStore, StateStore, RecordingSink]:
+) -> tuple[Deduplicator, ConfigStore, DedupBufferStore, RecordingSink]:
     config_store = _config_store(tmp_path, window_hours=window_hours, threshold=threshold)
-    state_store = StateStore(tmp_path / "state.json")
-    resolved_state = state if state is not None else StateData()
+    buffer_store = DedupBufferStore(tmp_path / "dedup-buffer.json")
+    resolved_buffer = buffer if buffer is not None else DedupBufferData()
     resolved_sink = sink or RecordingSink()
     dedup = Deduplicator(
         config_store=config_store,
-        state_store=state_store,
-        state=resolved_state,
+        buffer_store=buffer_store,
+        buffer=resolved_buffer,
         sink=resolved_sink,
         now=now or _clock(FIXED_DATE),
     )
-    return dedup, config_store, state_store, resolved_sink
+    return dedup, config_store, buffer_store, resolved_sink
 
 
 # --- попадание в окно: дубль глушится, §6, пункт 1 промпта -------------------
 
 
 def test_similar_post_within_window_is_dropped(tmp_path: Path) -> None:
-    dedup, _config_store, _state_store, sink = _make_dedup(
+    dedup, _config_store, _buffer_store, sink = _make_dedup(
         tmp_path, now=_clock(FIXED_DATE, FIXED_DATE, FIXED_DATE + dt.timedelta(minutes=5))
     )
 
@@ -126,7 +126,7 @@ def test_similar_post_within_window_is_dropped(tmp_path: Path) -> None:
 
 
 def test_dissimilar_post_is_not_dropped(tmp_path: Path) -> None:
-    dedup, _config_store, _state_store, sink = _make_dedup(tmp_path)
+    dedup, _config_store, _buffer_store, sink = _make_dedup(tmp_path)
 
     asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
     asyncio.run(dedup.handle(_post(2, "src_b"), [_result("t1", _unit(0, 1))]))
@@ -137,7 +137,7 @@ def test_dissimilar_post_is_not_dropped(tmp_path: Path) -> None:
 def test_dropped_duplicate_is_logged_with_similarity_and_matched_post(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    dedup, _config_store, _state_store, _sink = _make_dedup(tmp_path)
+    dedup, _config_store, _buffer_store, _sink = _make_dedup(tmp_path)
 
     with caplog.at_level(logging.INFO, logger="tg_monitor.deduplicator"):
         asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
@@ -158,7 +158,7 @@ def test_dropped_duplicate_is_logged_with_similarity_and_matched_post(
 
 
 def test_buffers_are_separated_by_topic(tmp_path: Path) -> None:
-    dedup, _config_store, _state_store, sink = _make_dedup(tmp_path)
+    dedup, _config_store, _buffer_store, sink = _make_dedup(tmp_path)
 
     asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
     # Тот же вектор, другая тема — другая аудитория, глушить нельзя (§6).
@@ -168,7 +168,7 @@ def test_buffers_are_separated_by_topic(tmp_path: Path) -> None:
 
 
 def test_one_post_can_be_duplicate_in_one_topic_and_new_in_another(tmp_path: Path) -> None:
-    dedup, _config_store, _state_store, sink = _make_dedup(tmp_path)
+    dedup, _config_store, _buffer_store, sink = _make_dedup(tmp_path)
 
     asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
     asyncio.run(
@@ -187,7 +187,7 @@ def test_one_post_can_be_duplicate_in_one_topic_and_new_in_another(tmp_path: Pat
 
 
 def test_entries_older_than_window_are_pruned_during_operation(tmp_path: Path) -> None:
-    dedup, _config_store, _state_store, sink = _make_dedup(
+    dedup, _config_store, _buffer_store, sink = _make_dedup(
         tmp_path,
         window_hours=1,
         # Первое значение — прунинг при инициализации (буфер пуст, не важно),
@@ -211,14 +211,13 @@ def test_stale_entries_are_pruned_on_load(tmp_path: Path) -> None:
         vector=[1.0, 0.0],
         ts=FIXED_DATE - dt.timedelta(hours=100),
     )
-    state = StateData(dedup_buffer=[stale])
+    buffer = DedupBufferData(entries=[stale])
 
-    dedup, _config_store, state_store, _sink = _make_dedup(
-        tmp_path, state=state, window_hours=48, now=_clock(FIXED_DATE)
+    dedup, _config_store, _buffer_store, _sink = _make_dedup(
+        tmp_path, buffer=buffer, window_hours=48, now=_clock(FIXED_DATE)
     )
 
-    assert dedup._state.dedup_buffer == []
-    assert state_store.load().dedup_buffer == []
+    assert dedup._buffer.entries == []
 
 
 # --- переживание перезапуска, §8 ---------------------------------------------
@@ -226,35 +225,75 @@ def test_stale_entries_are_pruned_on_load(tmp_path: Path) -> None:
 
 def test_buffer_survives_restart(tmp_path: Path) -> None:
     config_store = _config_store(tmp_path)
-    state_path = tmp_path / "state.json"
+    buffer_path = tmp_path / "dedup-buffer.json"
 
-    state_store_a = StateStore(state_path)
-    state_a = state_store_a.load()
+    buffer_store_a = DedupBufferStore(buffer_path)
+    buffer_a = buffer_store_a.load()
     sink_a = RecordingSink()
     dedup_a = Deduplicator(
         config_store=config_store,
-        state_store=state_store_a,
-        state=state_a,
+        buffer_store=buffer_store_a,
+        buffer=buffer_a,
         sink=sink_a,
         now=_clock(FIXED_DATE),
     )
     asyncio.run(dedup_a.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
     assert sink_a.posts
 
-    # Новый процесс: свежий StateStore и state, загруженные с диска.
-    state_store_b = StateStore(state_path)
-    state_b = state_store_b.load()
+    # Новый процесс: свежий DedupBufferStore и buffer, загруженные с диска.
+    buffer_store_b = DedupBufferStore(buffer_path)
+    buffer_b = buffer_store_b.load()
     sink_b = RecordingSink()
     dedup_b = Deduplicator(
         config_store=config_store,
-        state_store=state_store_b,
-        state=state_b,
+        buffer_store=buffer_store_b,
+        buffer=buffer_b,
         sink=sink_b,
         now=_clock(FIXED_DATE + dt.timedelta(minutes=10)),
     )
     asyncio.run(dedup_b.handle(_post(2, "src_b"), [_result("t1", _unit(1, 0))]))
 
     assert sink_b.posts == []  # признан дублем поста 1 из предыдущего запуска
+
+
+def test_buffer_not_rewritten_when_post_is_screened_out(tmp_path: Path) -> None:
+    # §8 v2.2, пункт 2 промпта: файл переписывается только когда пост прошёл
+    # тему. Отсеянный (дублирующий) пост не должен трогать файл на диске,
+    # даже если прунинг что-то вычистил из буфера в памяти.
+    config_store = _config_store(tmp_path, window_hours=1)
+    buffer_path = tmp_path / "dedup-buffer.json"
+    stale = DedupEntry(
+        topic_id="t1",
+        source_id="src_old",
+        message_id=0,
+        vector=[1.0, 0.0],
+        ts=FIXED_DATE - dt.timedelta(hours=100),
+    )
+    buffer_store = DedupBufferStore(buffer_path)
+    buffer_store.save(DedupBufferData(entries=[stale]))
+    content_before = buffer_path.read_text(encoding="utf-8")
+
+    sink = RecordingSink()
+    dedup = Deduplicator(
+        config_store=config_store,
+        buffer_store=buffer_store,
+        buffer=buffer_store.load(),
+        sink=sink,
+        now=_clock(FIXED_DATE, FIXED_DATE, FIXED_DATE),
+    )
+    # Прунинг при инициализации вычищает "stale" (окно час, запись старше
+    # ста часов) в памяти, но это не должно тронуть файл — прунинг сам по
+    # себе не запись.
+    assert buffer_path.read_text(encoding="utf-8") == content_before
+
+    # Первый пост проходит тему и должен вызвать запись.
+    asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
+    content_after_pass = buffer_path.read_text(encoding="utf-8")
+    assert content_after_pass != content_before
+
+    # Второй пост — точный дубль первого, отсеян: файл не должен переписаться.
+    asyncio.run(dedup.handle(_post(2, "src_b"), [_result("t1", _unit(1, 0))]))
+    assert buffer_path.read_text(encoding="utf-8") == content_after_pass
 
 
 # --- поведение при ошибке, §9, пункт 7 промпта -------------------------------
@@ -264,12 +303,12 @@ def test_error_forwards_post_unfiltered_and_logs_error(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     config_store = _config_store(tmp_path)
-    state_store = StateStore(tmp_path / "state.json")
+    buffer_store = DedupBufferStore(tmp_path / "dedup-buffer.json")
     # Вектор другой размерности в буфере — имитирует смену модели эмбеддера
     # без очистки старого буфера: сравнение обязано упасть на несовпадении
     # размерностей, а не молча всё отбросить и не уронить обработку поста.
-    state = StateData(
-        dedup_buffer=[
+    buffer = DedupBufferData(
+        entries=[
             DedupEntry(
                 topic_id="t1",
                 source_id="src_old",
@@ -282,8 +321,8 @@ def test_error_forwards_post_unfiltered_and_logs_error(
     sink = RecordingSink()
     dedup = Deduplicator(
         config_store=config_store,
-        state_store=state_store,
-        state=state,
+        buffer_store=buffer_store,
+        buffer=buffer,
         sink=sink,
         now=_clock(FIXED_DATE),
     )

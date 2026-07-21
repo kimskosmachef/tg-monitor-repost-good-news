@@ -9,10 +9,13 @@ import pytest
 
 from tg_monitor.models import Facet, Topic
 from tg_monitor.state import (
+    DedupBufferData,
+    DedupBufferStore,
     DedupEntry,
     StateData,
     StateStore,
     compute_topic_centroid_version,
+    default_dedup_buffer_path,
     reconcile_topic_centroid_versions,
 )
 
@@ -24,7 +27,6 @@ def test_load_returns_empty_state_when_file_missing(tmp_path: Path) -> None:
 
     assert state == StateData()
     assert state.last_message_id == {}
-    assert state.dedup_buffer == []
 
 
 def test_load_missing_file_logs_info_not_error(
@@ -138,15 +140,6 @@ def test_save_then_load_roundtrip(tmp_path: Path) -> None:
     store = StateStore(path)
     state = StateData(
         last_message_id={"src_a": 42},
-        dedup_buffer=[
-            DedupEntry(
-                topic_id="topic_one",
-                source_id="src_a",
-                message_id=42,
-                vector=[0.1, 0.2, 0.3],
-                ts=dt.datetime(2026, 7, 20, 12, 0, tzinfo=dt.UTC),
-            )
-        ],
         topic_centroid_versions={"topic_one": "abc123"},
     )
 
@@ -255,3 +248,127 @@ def test_reconcile_does_not_warn_when_version_unchanged(
         reconcile_topic_centroid_versions(state, [topic])
 
     assert _state_warnings(caplog) == []
+
+
+# --- default_dedup_buffer_path: путь рядом со state.json, §8 v2.2 -----------
+
+
+def test_default_dedup_buffer_path_is_next_to_state_path(tmp_path: Path) -> None:
+    state_path = tmp_path / "state.json"
+
+    assert default_dedup_buffer_path(state_path) == tmp_path / "dedup-buffer.json"
+
+
+# --- DedupBufferStore: dedup-buffer.json, §8 v2.2 ---------------------------
+
+
+def test_dedup_buffer_store_returns_empty_when_missing(tmp_path: Path) -> None:
+    store = DedupBufferStore(tmp_path / "dedup-buffer.json")
+
+    buffer = store.load()
+
+    assert buffer == DedupBufferData()
+
+
+def test_dedup_buffer_store_missing_logs_info_not_error(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # §8 v2.2: отсутствие буфера — не потеря постов, а штатный первый запуск
+    # или потеря, которая не фатальна. ERROR здесь был бы ложной тревогой.
+    store = DedupBufferStore(tmp_path / "dedup-buffer.json")
+
+    with caplog.at_level(logging.INFO):
+        store.load()
+
+    assert not any(record.levelno >= logging.ERROR for record in caplog.records)
+    assert any(record.levelno == logging.INFO for record in caplog.records)
+
+
+def test_dedup_buffer_store_corrupt_json_returns_empty_and_quarantines(tmp_path: Path) -> None:
+    path = tmp_path / "dedup-buffer.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    store = DedupBufferStore(path)
+
+    buffer = store.load()
+
+    assert buffer == DedupBufferData()
+    assert not path.exists()
+    bad_path = tmp_path / "dedup-buffer.json.bad"
+    assert bad_path.read_text(encoding="utf-8") == "{not valid json"
+
+
+def test_dedup_buffer_store_corrupt_json_logs_error_not_fatal(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "dedup-buffer.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    store = DedupBufferStore(path)
+
+    with caplog.at_level(logging.ERROR):
+        store.load()
+
+    assert any(record.levelno == logging.ERROR for record in caplog.records)
+    # §8 v2.2, пункт 4 промпта: не должно звучать как потеря постов.
+    assert "посты не теряются" in caplog.text
+
+
+def test_dedup_buffer_store_schema_mismatch_returns_empty_and_quarantines(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "dedup-buffer.json"
+    original = json.dumps({"entries": "not-a-list"})
+    path.write_text(original, encoding="utf-8")
+    store = DedupBufferStore(path)
+
+    buffer = store.load()
+
+    assert buffer == DedupBufferData()
+    assert not path.exists()
+    bad_path = tmp_path / "dedup-buffer.json.bad"
+    assert bad_path.read_text(encoding="utf-8") == original
+
+
+def test_dedup_buffer_store_save_then_load_roundtrip(tmp_path: Path) -> None:
+    path = tmp_path / "dedup-buffer.json"
+    store = DedupBufferStore(path)
+    buffer = DedupBufferData(
+        entries=[
+            DedupEntry(
+                topic_id="topic_one",
+                source_id="src_a",
+                message_id=42,
+                vector=[0.1, 0.2, 0.3],
+                ts=dt.datetime(2026, 7, 20, 12, 0, tzinfo=dt.UTC),
+            )
+        ]
+    )
+
+    store.save(buffer)
+    loaded = store.load()
+
+    assert loaded == buffer
+
+
+def test_dedup_buffer_store_save_is_atomic_no_leftover_tmp_files(tmp_path: Path) -> None:
+    path = tmp_path / "dedup-buffer.json"
+    store = DedupBufferStore(path)
+
+    store.save(DedupBufferData())
+
+    entries = list(tmp_path.iterdir())
+    assert entries == [path]
+
+
+def test_dedup_buffer_store_quarantined_file_not_overwritten_by_subsequent_save(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "dedup-buffer.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    store = DedupBufferStore(path)
+
+    buffer = store.load()
+    store.save(buffer)
+
+    bad_path = tmp_path / "dedup-buffer.json.bad"
+    assert bad_path.read_text(encoding="utf-8") == "{not valid json"
+    assert path.exists()

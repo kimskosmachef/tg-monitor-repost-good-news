@@ -26,7 +26,7 @@ from tg_monitor.config_store import ConfigStore
 from tg_monitor.embedder import Vector
 from tg_monitor.matcher import MatchResult
 from tg_monitor.models import Post
-from tg_monitor.state import DedupEntry, StateData, StateStore
+from tg_monitor.state import DedupBufferData, DedupBufferStore, DedupEntry
 
 logger = logging.getLogger(__name__)
 
@@ -46,35 +46,39 @@ def _cosine(a: Vector, b: Vector) -> float:
 class Deduplicator:
     """Кольцевой буфер векторов опубликованного, раздельный по темам — §6.
 
-    Буфер живёт в `state.json` (`StateData.dedup_buffer`, §8) и переживает
-    перезапуск: та же схема, что читает и пишет `TelegramReader` для
-    `last_message_id`, — оба компонента делят один и тот же объект `state` и
-    один `StateStore`, независимо сохраняя его при своих изменениях.
+    Буфер живёт в `dedup-buffer.json` (`DedupBufferData`, §8) — отдельно от
+    `state.json`, который держит `last_message_id` и версии центроидов.
+    Разделение не косметическое: `state.json` переписывается на каждый пост
+    и должен оставаться маленьким, а буфер дедупа — это сотни векторов,
+    единицы мегабайт, и пишется он только когда меняется составом (см.
+    `_filter_duplicates`), а не на каждый обработанный пост.
     """
 
     def __init__(
         self,
         config_store: ConfigStore,
-        state_store: StateStore,
-        state: StateData,
+        buffer_store: DedupBufferStore,
+        buffer: DedupBufferData,
         sink: Sink,
         log: logging.Logger | None = None,
         now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     ) -> None:
         self._config_store = config_store
-        self._state_store = state_store
-        self._state = state
+        self._buffer_store = buffer_store
+        self._buffer = buffer
         self._sink = sink
         self._logger = log or logger
         self._now = now
 
         # §8, пункт 4 промпта: записи старше окна вычищаются уже при загрузке,
         # не только по ходу работы — иначе состояние, накопленное до долгого
-        # простоя, раздувало бы буфер до первого же прошедшего поста.
+        # простоя, раздувало бы буфер до первого же прошедшего поста. Сам
+        # прунинг при старте на диск не пишется — файл меняется только когда
+        # пост проходит тему (§8 v2.2, пункт 2 промпта), а не из-за одной
+        # лишь чистки просроченных записей.
         bundle = self._config_store.get()
         window = dt.timedelta(hours=bundle.config.runtime.dedup_window_hours)
-        if self._prune(self._now(), window):
-            self._state_store.save(self._state)
+        self._prune(self._now(), window)
 
     async def handle(self, post: Post, results: list[MatchResult]) -> None:
         """Отфильтровать дубли из `results` и передать пост дальше, если что-то осталось.
@@ -104,7 +108,7 @@ class Deduplicator:
         threshold = bundle.config.runtime.dedup_threshold
         now = self._now()
 
-        pruned = self._prune(now, window)
+        self._prune(now, window)
 
         survivors: list[MatchResult] = []
         new_entries: list[DedupEntry] = []
@@ -137,9 +141,13 @@ class Deduplicator:
                 )
             )
 
-        if new_entries or pruned:
-            self._state.dedup_buffer.extend(new_entries)
-            self._state_store.save(self._state)
+        # §8 v2.2, пункт 2 промпта: файл переписывается только когда буфер
+        # реально меняется составом, то есть пост прошёл тему. Отсеянный
+        # пост (survivors пуст, new_entries пуст) записи не вызывает — даже
+        # если чистка просроченных записей выше что-то из буфера убрала.
+        if new_entries:
+            self._buffer.entries.extend(new_entries)
+            self._buffer_store.save(self._buffer)
 
         return survivors
 
@@ -148,7 +156,7 @@ class Deduplicator:
     ) -> tuple[DedupEntry, float] | None:
         # §6: дедуп — в пределах одной темы, буфер других тем не участвует.
         best: tuple[DedupEntry, float] | None = None
-        for entry in self._state.dedup_buffer:
+        for entry in self._buffer.entries:
             if entry.topic_id != topic_id:
                 continue
             similarity = _cosine(np.asarray(entry.vector, dtype=np.float32), vector)
@@ -156,9 +164,6 @@ class Deduplicator:
                 best = (entry, similarity)
         return best
 
-    def _prune(self, now: dt.datetime, window: dt.timedelta) -> bool:
+    def _prune(self, now: dt.datetime, window: dt.timedelta) -> None:
         cutoff = now - window
-        kept = [entry for entry in self._state.dedup_buffer if entry.ts >= cutoff]
-        removed = len(kept) != len(self._state.dedup_buffer)
-        self._state.dedup_buffer = kept
-        return removed
+        self._buffer.entries = [entry for entry in self._buffer.entries if entry.ts >= cutoff]

@@ -1,12 +1,21 @@
 """Хранилище состояния — §8 docs/spec.md.
 
-`state.json`: last_message_id по источникам, буфер векторов дедупа,
-версия центроида каждой темы (хэш от примеров). Запись атомарная
-(tempfile + os.replace). Отсутствие или порча файла — не падение,
-старт с текущего момента (буфер дедупа и last_message_id пустые).
+`state.json` — горячий файл, переписывается после каждого обработанного
+поста: last_message_id по источникам, версия центроида каждой темы (хэш
+от примеров). Держится маленьким специально — буфер дедупа в нём не
+живёт (см. `DedupBufferData`/`DedupBufferStore` ниже), иначе каждая
+запись last_message_id гоняла бы через диск мегабайты векторов, которые
+не изменились.
+
+Запись атомарная (tempfile + os.replace). Отсутствие или порча файла —
+не падение, старт с текущего момента (last_message_id пустой).
 Испорченный файл не затирается валидным при следующей записи — он
 переименовывается в `<имя>.bad`, иначе посмертный разбор причины порчи
 невозможен.
+
+`dedup-buffer.json` живёт рядом со `state.json` (`default_dedup_buffer_path`)
+и переносит те же гарантии атомарности, но с более мягкими правилами при
+потере: см. `DedupBufferStore`.
 """
 
 from __future__ import annotations
@@ -40,11 +49,25 @@ class DedupEntry(BaseModel):
 
 
 class StateData(BaseModel):
-    """Полная схема state.json — §8."""
+    """Полная схема state.json — §8. Буфер дедупа сюда не входит: он в
+    `DedupBufferData`, отдельном файле рядом (`dedup-buffer.json`)."""
 
     last_message_id: dict[str, int] = Field(default_factory=dict)
-    dedup_buffer: list[DedupEntry] = Field(default_factory=list)
     topic_centroid_versions: dict[str, str] = Field(default_factory=dict)
+
+
+class DedupBufferData(BaseModel):
+    """Схема dedup-buffer.json — §8. Живёт отдельно от state.json: пишется
+    только когда буфер меняется составом (пост прошёл тему), а не на
+    каждый обработанный пост."""
+
+    entries: list[DedupEntry] = Field(default_factory=list)
+
+
+def default_dedup_buffer_path(state_path: Path) -> Path:
+    """Путь к dedup-buffer.json рядом со state.json — §8: отдельным
+    параметром запуска не заводится, всегда выводится из пути state.json."""
+    return state_path.with_name("dedup-buffer.json")
 
 
 def compute_topic_centroid_version(topic: Topic) -> str:
@@ -85,6 +108,36 @@ def reconcile_topic_centroid_versions(
         state.topic_centroid_versions[topic.id] = version
 
 
+def _atomic_write_text(path: Path, payload: str) -> None:
+    """Запись файла через temp + os.replace — общая для state.json и dedup-buffer.json."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            tmp_file.write(payload)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+        Path(tmp_name).replace(path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+
+
+def _quarantine_to_bad(path: Path, logger: logging.Logger) -> None:
+    """Переименовать испорченный файл в `<имя>.bad`, не затирая его — общая
+    для state.json и dedup-buffer.json (§8 v1.9)."""
+    bad_path = path.with_name(f"{path.name}.bad")
+    try:
+        path.replace(bad_path)
+    except OSError as exc:
+        logger.error(
+            "не удалось переименовать %s в %s (%s), испорченный файл остался на месте",
+            path,
+            bad_path,
+            exc,
+        )
+
+
 class StateStore:
     """Загрузка/сохранение state.json с атомарной записью."""
 
@@ -116,16 +169,7 @@ class StateStore:
         # записи — переименовывается в `<имя>.bad`, иначе разбирать причину
         # порчи после факта будет не по чему.
         self._log_state_loss(reason)
-        bad_path = self._path.with_name(f"{self._path.name}.bad")
-        try:
-            self._path.replace(bad_path)
-        except OSError as exc:
-            self._logger.error(
-                "не удалось переименовать %s в %s (%s), испорченный файл остался на месте",
-                self._path,
-                bad_path,
-                exc,
-            )
+        _quarantine_to_bad(self._path, self._logger)
 
     def _log_state_loss(self, reason: str) -> None:
         # §8: файл был, но испорчен/не читается — это настоящая потеря
@@ -138,17 +182,49 @@ class StateStore:
         )
 
     def save(self, state: StateData) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = state.model_dump_json(indent=2)
-        fd, tmp_name = tempfile.mkstemp(
-            dir=self._path.parent, prefix=f".{self._path.name}.", suffix=".tmp"
-        )
+        _atomic_write_text(self._path, state.model_dump_json(indent=2))
+
+
+class DedupBufferStore:
+    """Загрузка/сохранение dedup-buffer.json — §8.
+
+    В отличие от `StateStore` потеря этого файла не фатальна: буфер не
+    хранит last_message_id, только защиту от повторной публикации в окне
+    `dedup_window_hours`. Отсутствие файла — INFO и пустой буфер (как и у
+    state.json), но порча — тоже ERROR и карантин в `.bad`, только с более
+    мягкой формулировкой: посты не теряются, снимается лишь защита от
+    дублей на время до следующего разбора.
+    """
+
+    def __init__(self, path: Path, logger: logging.Logger | None = None) -> None:
+        self._path = path
+        self._logger = logger or logging.getLogger(__name__)
+
+    def load(self) -> DedupBufferData:
+        if not self._path.exists():
+            self._logger.info(
+                "%s не найден: старт с пустым буфером дедупа (не фатально)", self._path
+            )
+            return DedupBufferData()
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
-                tmp_file.write(payload)
-                tmp_file.flush()
-                os.fsync(tmp_file.fileno())
-            Path(tmp_name).replace(self._path)
-        except BaseException:
-            Path(tmp_name).unlink(missing_ok=True)
-            raise
+            raw = self._path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as exc:
+            self._quarantine(f"{self._path} повреждён ({exc})")
+            return DedupBufferData()
+        try:
+            return DedupBufferData.model_validate(data)
+        except (ValidationError, TypeError) as exc:
+            self._quarantine(f"{self._path} не соответствует схеме ({exc})")
+            return DedupBufferData()
+
+    def _quarantine(self, reason: str) -> None:
+        self._logger.error(
+            "%s: буфер дедупа потерян, защита от дублей временно снята "
+            "(посты не теряются, старт с пустым буфером)",
+            reason,
+        )
+        _quarantine_to_bad(self._path, self._logger)
+
+    def save(self, buffer: DedupBufferData) -> None:
+        _atomic_write_text(self._path, buffer.model_dump_json(indent=2))
