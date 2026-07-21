@@ -62,8 +62,10 @@ async def _main() -> None:
         sink=LoggingSink(tz=ZoneInfo(bundle.config.logging.timezone)),
     )
 
-    # §8: сверка версий центроидов при старте — до того, как Reader (пакет 2)
-    # сам перечитает то же state.json себе в память.
+    # §8 v1.9: state.json читается один раз здесь — сверка версий центроидов
+    # идёт по этому же объекту, который затем передаётся в Reader как есть,
+    # без повторного чтения с диска (было хрупко: порядок load() в watch.py
+    # и в Reader имел значение сам по себе).
     state_store = StateStore(args.state)
     state = state_store.load()
     reconcile_topic_centroid_versions(state, bundle.topics, logger)
@@ -73,6 +75,7 @@ async def _main() -> None:
         client=client,
         config_store=config_store,
         state_store=state_store,
+        state=state,
         sink=matching_sink,
     )
     await run_with_graceful_shutdown(reader)
