@@ -164,10 +164,16 @@ class Matcher:
         self._centroids = centroid_store or CentroidStore(embedder)
         self._logger = log or logger
 
-    def score_post(self, post: Post) -> list[MatchResult]:
-        """Оценить пост по всем темам. §5.3: пост без текста не оценивается вовсе."""
+    def embed_post(self, post: Post) -> list[Vector] | None:
+        """Разбить пост на чанки и получить их векторы — единственный прямой вызов
+        эмбеддера на самом посте (§9: узкий try в `MatchingSink.handle` оборачивает
+        именно этот вызов, чтобы отличить сбой модели от прочих ошибок оценки).
+
+        `None` — пост не даёт ни одного чанка (без текста, §5.3, либо после
+        чанкования не осталось непустых абзацев): дальше оценивать нечего.
+        """
         if not post.text:
-            return []
+            return None
         bundle = self._config_store.get()
         chunks = chunk_text(
             post.text,
@@ -175,8 +181,17 @@ class Matcher:
             max_chunk_chars=bundle.config.embedder.max_chunk_chars,
         )
         if not chunks:
-            return []
-        chunk_vectors = self._embedder.embed(chunks)
+            return None
+        return self._embedder.embed(chunks)
+
+    def score_chunks(self, post: Post, chunk_vectors: list[Vector]) -> list[MatchResult]:
+        """Оценить уже полученные векторы чанков по всем темам (§5).
+
+        Отдельно от `embed_post` ради §9: центроиды тем тоже считаются через
+        эмбеддер (`CentroidStore`), но их сбой — это уже «прочая ошибка при
+        оценке поста», а не сбой эмбеддера на самом посте.
+        """
+        bundle = self._config_store.get()
         boost = source_boost(bundle.sources, post.source_id)
 
         results: list[MatchResult] = []
@@ -187,6 +202,18 @@ class Matcher:
             if result is not None:
                 results.append(result)
         return results
+
+    def score_post(self, post: Post) -> list[MatchResult]:
+        """Оценить пост по всем темам. §5.3: пост без текста не оценивается вовсе.
+
+        Удобная обёртка над `embed_post` + `score_chunks` для вызывающих, которым
+        не нужно различать источник ошибки (scripts/score.py, тесты) —
+        `MatchingSink.handle` использует эти два метода раздельно.
+        """
+        chunk_vectors = self.embed_post(post)
+        if chunk_vectors is None:
+            return []
+        return self.score_chunks(post, chunk_vectors)
 
     def _score_topic(
         self,
@@ -272,15 +299,15 @@ class MatchingSink:
             )
             return
 
+        # §9 v1.9: узкий try вокруг самого вызова эмбеддера — сбой модели
+        # (OOM и т.п.) не должен долетать до Reader (там он попал бы в общий
+        # except и last_message_id не продвинулся бы, а следующий добор
+        # истории обработал бы тот же пост заново до следующего же сбоя).
+        # Пост штатно помечается обработанным — TODO(пакет 6): уведомление
+        # в служебный канал.
         try:
-            results = self._matcher.score_post(post)
+            chunk_vectors = self._matcher.embed_post(post)
         except Exception:
-            # Блокер §9: ошибка эмбеддера (сбой модели, OOM и т.п.) не должна
-            # долетать до Reader — там она попала бы в общий except и
-            # last_message_id не продвинулся бы, а Reader на следующем доборе
-            # истории обработал бы тот же пост заново до следующего же сбоя.
-            # Здесь пост штатно помечается обработанным: лог с id и причиной
-            # есть, ретраить нечем — TODO(пакет 6): уведомление в служебный канал.
             self._logger.exception(
                 "ошибка эмбеддера при оценке поста, пост помечен обработанным без "
                 "повтора: source=%s message_id=%s",
@@ -288,6 +315,23 @@ class MatchingSink:
                 post.message_id,
             )
             return
+
+        if chunk_vectors is None:
+            results: list[MatchResult] = []
+        else:
+            # Общий try вокруг остального score_post (сопоставление с темами,
+            # пересчёт центроидов и т.п.) — причина в логе честная, не
+            # маскируется под сбой эмбеддера на самом посте.
+            try:
+                results = self._matcher.score_chunks(post, chunk_vectors)
+            except Exception:
+                self._logger.exception(
+                    "ошибка при оценке поста, пост помечен обработанным без "
+                    "повтора: source=%s message_id=%s",
+                    post.source_id,
+                    post.message_id,
+                )
+                return
 
         if not results:
             self._logger.info(

@@ -493,7 +493,51 @@ def test_matching_sink_swallows_embedder_error_and_marks_post_handled(
     assert downstream.posts == []
     assert any(
         record.levelno == logging.ERROR
+        and "ошибка эмбеддера" in record.getMessage()
         and "src_a" in record.getMessage()
         and "11" in record.getMessage()
         for record in caplog.records
     )
+
+
+# --- MatchingSink: прочая ошибка при оценке поста — честная формулировка,
+# не маскируется под сбой эмбеддера, §9 v1.9 -----------------------------------
+
+
+class CentroidFailingEmbedder:
+    """Эмбеддинг самого поста проходит, а эмбеддинг примеров грани (центроид
+    темы) падает — имитирует сбой не в узком try вокруг вызова эмбеддера на
+    посте, а дальше по цепочке score_post, при пересчёте центроида."""
+
+    def __init__(self, post_text: str, post_vector: Vector) -> None:
+        self._post_text = post_text
+        self._post_vector = post_vector
+
+    def embed(self, texts: Sequence[str]) -> list[Vector]:
+        if list(texts) == [self._post_text]:
+            return [self._post_vector]
+        raise RuntimeError("сбой пересчёта центроида")
+
+
+def test_matching_sink_logs_honest_reason_for_non_embedder_scoring_error(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    topics = [_topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5)]
+    config_store = _write_configs(tmp_path, topics)
+    embedder = CentroidFailingEmbedder("текст поста", _unit(1, 0))
+    matcher = Matcher(embedder=embedder, config_store=config_store)
+    downstream = RecordingSink()
+    sink = MatchingSink(matcher=matcher, sink=downstream)
+
+    with caplog.at_level(logging.ERROR, logger="tg_monitor.matcher"):
+        asyncio.run(sink.handle(_post("текст поста", source_id="src_a", message_id=12)))
+
+    assert downstream.posts == []
+    assert any(
+        record.levelno == logging.ERROR
+        and "ошибка при оценке поста" in record.getMessage()
+        and "src_a" in record.getMessage()
+        and "12" in record.getMessage()
+        for record in caplog.records
+    )
+    assert not any("ошибка эмбеддера" in record.getMessage() for record in caplog.records)
