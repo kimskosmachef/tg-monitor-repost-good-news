@@ -48,6 +48,33 @@ def compute_topic_centroid_version(topic: Topic) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def reconcile_topic_centroid_versions(
+    state: StateData, topics: list[Topic], logger: logging.Logger | None = None
+) -> None:
+    """Сверить версии центроидов из state.json с вычисленными по текущим topics.yaml (§8).
+
+    Вызывается один раз при старте. Расхождение с сохранённой версией
+    означает, что грани темы правились между запусками процесса — без этого
+    лога сдвиг результатов после правки примеров выглядел бы необъяснимым.
+    Новой темы в сохранённом state ещё нет — это не расхождение, а первая
+    запись версии. `state.topic_centroid_versions` обновляется на месте,
+    сохранение на диск — забота вызывающего кода.
+    """
+    log = logger or logging.getLogger(__name__)
+    for topic in topics:
+        version = compute_topic_centroid_version(topic)
+        previous = state.topic_centroid_versions.get(topic.id)
+        if previous is not None and previous != version:
+            log.warning(
+                "версия центроида темы %s изменилась с прошлого запуска: %s -> %s "
+                "(грани темы правились между запусками)",
+                topic.id,
+                previous,
+                version,
+            )
+        state.topic_centroid_versions[topic.id] = version
+
+
 class StateStore:
     """Загрузка/сохранение state.json с атомарной записью."""
 

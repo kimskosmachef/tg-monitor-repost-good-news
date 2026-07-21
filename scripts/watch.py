@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -23,8 +24,10 @@ from tg_monitor.embedder import SentenceTransformerEmbedder
 from tg_monitor.logging_setup import setup_logging
 from tg_monitor.matcher import Matcher, MatchingSink
 from tg_monitor.reader import LoggingSink, TelegramReader, run_with_graceful_shutdown
-from tg_monitor.state import StateStore
+from tg_monitor.state import StateStore, reconcile_topic_centroid_versions
 from tg_monitor.telegram_env import load_api_credentials
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -59,10 +62,17 @@ async def _main() -> None:
         sink=LoggingSink(tz=ZoneInfo(bundle.config.logging.timezone)),
     )
 
+    # §8: сверка версий центроидов при старте — до того, как Reader (пакет 2)
+    # сам перечитает то же state.json себе в память.
+    state_store = StateStore(args.state)
+    state = state_store.load()
+    reconcile_topic_centroid_versions(state, bundle.topics, logger)
+    state_store.save(state)
+
     reader = TelegramReader(
         client=client,
         config_store=config_store,
-        state_store=StateStore(args.state),
+        state_store=state_store,
         sink=matching_sink,
     )
     await run_with_graceful_shutdown(reader)

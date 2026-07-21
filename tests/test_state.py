@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from tg_monitor.models import Facet, Topic
-from tg_monitor.state import DedupEntry, StateData, StateStore, compute_topic_centroid_version
+from tg_monitor.state import (
+    DedupEntry,
+    StateData,
+    StateStore,
+    compute_topic_centroid_version,
+    reconcile_topic_centroid_versions,
+)
 
 
 def test_load_returns_empty_state_when_file_missing(tmp_path: Path) -> None:
@@ -149,3 +155,56 @@ def test_compute_topic_centroid_version_stable_for_same_examples() -> None:
     topic = Topic(id="t", target="@t", facets=[Facet(id="f", examples=["a", "b"])])
 
     assert compute_topic_centroid_version(topic) == compute_topic_centroid_version(topic)
+
+
+# --- reconcile_topic_centroid_versions: сверка при старте, §8 v1.8 ----------
+
+
+def _topic(id_: str, examples: list[str]) -> Topic:
+    return Topic(id=id_, target="@t", facets=[Facet(id="f", examples=examples)])
+
+
+def _state_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    # Конструирование Topic само по себе может варнить (мало примеров в
+    # грани) — эти записи приходят от tg_monitor.models, отфильтровываем их,
+    # чтобы проверять только то, что логирует сама сверка версий.
+    return [record.getMessage() for record in caplog.records if record.name == "tg_monitor.state"]
+
+
+def test_reconcile_records_version_for_new_topic_without_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    state = StateData()
+    topic = _topic("t1", ["a"])
+
+    with caplog.at_level(logging.WARNING, logger="tg_monitor.state"):
+        reconcile_topic_centroid_versions(state, [topic])
+
+    assert state.topic_centroid_versions["t1"] == compute_topic_centroid_version(topic)
+    assert _state_warnings(caplog) == []
+
+
+def test_reconcile_logs_warning_with_topic_id_when_version_changed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    old_topic = _topic("t1", ["a"])
+    state = StateData(topic_centroid_versions={"t1": compute_topic_centroid_version(old_topic)})
+    new_topic = _topic("t1", ["a", "b"])
+
+    with caplog.at_level(logging.WARNING, logger="tg_monitor.state"):
+        reconcile_topic_centroid_versions(state, [new_topic])
+
+    assert state.topic_centroid_versions["t1"] == compute_topic_centroid_version(new_topic)
+    assert any("t1" in message for message in _state_warnings(caplog))
+
+
+def test_reconcile_does_not_warn_when_version_unchanged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    topic = _topic("t1", ["a"])
+    state = StateData(topic_centroid_versions={"t1": compute_topic_centroid_version(topic)})
+
+    with caplog.at_level(logging.WARNING, logger="tg_monitor.state"):
+        reconcile_topic_centroid_versions(state, [topic])
+
+    assert _state_warnings(caplog) == []
