@@ -6,6 +6,8 @@
 
 # состояние рантайма
 state.json
+dedup-buffer.json
+*.bad
 *.log
 
 # python
