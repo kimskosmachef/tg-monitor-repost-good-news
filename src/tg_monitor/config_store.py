@@ -81,6 +81,10 @@ class _TrackedTopics:
     value: list[Topic]
     mtime: float
     example_mtimes: dict[Path, float] = field(default_factory=dict)
+    # Пока файл примеров не почтен, mtime не даёт покоя maybe_reload на каждом
+    # get() (Matcher вызывает его на каждом посте) — без дедупликации одна и
+    # та же ошибка спамила бы лог на каждый пост, пока конфиг не почтен.
+    _last_error: str | None = field(default=None, repr=False)
 
     @classmethod
     def load_initial(cls, path: Path) -> _TrackedTopics:
@@ -104,11 +108,17 @@ class _TrackedTopics:
         try:
             new_value = load_topics(self.path)
         except ConfigError as exc:
-            logger.error("%s не применён, использую предыдущую валидную версию: %s", self.path, exc)
+            reason = str(exc)
+            if reason != self._last_error:
+                logger.error(
+                    "%s не применён, использую предыдущую валидную версию: %s", self.path, exc
+                )
+                self._last_error = reason
             return
         self.value = new_value
         self.mtime = mtime
         self.example_mtimes = _stat_paths(examples_paths_for(new_value, self.path.parent))
+        self._last_error = None
 
 
 class ConfigStore:
@@ -160,6 +170,7 @@ class ConfigStore:
         self._topics_file.example_mtimes = _stat_paths(
             examples_paths_for(new_value, new_path.parent)
         )
+        self._topics_file._last_error = None
 
     def _resync_dependent_path[T](self, tracked: _TrackedFile[T], configured_name: str) -> None:
         """Если config.yaml поменял имя файла источников — перечитать с новым путём."""
