@@ -69,20 +69,26 @@ def _topic(
 ) -> Topic:
     # Строится напрямую в Python, а не через load_topics — файлы примеров
     # (§4.2) сюда не нужны, examples_file здесь чисто номинален (для тестов
-    # CentroidStore, которые не читают файлы с диска).
-    return Topic(
+    # CentroidStore, которые не читают файлы с диска). examples/negatives
+    # присваиваются атрибутом уже после конструирования — так же, как это
+    # делает config_loader.load_topics(), а не конструктором: Facet/Topic
+    # отклоняют инлайн "examples"/"negatives" как входные поля (§4.2).
+    facet_objs = []
+    for fid, examples in facets:
+        facet = Facet(id=fid, examples_file=f"{fid}.txt")
+        facet.examples = list(examples)
+        facet_objs.append(facet)
+    topic = Topic(
         id=id_,
         target="@target",
         sources=sources,
         threshold=threshold,
         soft_threshold=soft_threshold,
-        facets=[
-            Facet(id=fid, examples_file=f"{fid}.txt", examples=list(examples))
-            for fid, examples in facets
-        ],
+        facets=facet_objs,
         negatives_file="negatives.txt" if negatives else None,
-        negatives=list(negatives),
     )
+    topic.negatives = list(negatives)
+    return topic
 
 
 # --- построение config.yaml/topics.yaml/sources.yaml на диске (для Matcher) -

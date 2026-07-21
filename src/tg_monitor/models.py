@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -71,6 +71,20 @@ class Facet(StrictModel):
     examples_file: str
     examples: list[str] = Field(default_factory=list, exclude=True)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_inline_examples(cls, data: Any) -> Any:
+        # §4.2: старый формат (инлайн-список в topics.yaml) — не молчаливо
+        # игнорируется и не переопределяется файлом, а ошибка конфига, как и
+        # требует StrictModel. config_loader заполняет `examples` уже после
+        # валидации, присваиванием атрибута — сюда это не попадает.
+        if isinstance(data, dict) and "examples" in data:
+            raise ValueError(
+                "examples задаётся только через examples_file (§4.2) — "
+                "инлайн-список в topics.yaml больше не поддерживается"
+            )
+        return data
+
 
 class Topic(StrictModel):
     """Тема: грани, целевой канал, порог, источники — §4, §5."""
@@ -89,6 +103,17 @@ class Topic(StrictModel):
     negatives_file: str | None = None
     # Загружено из negatives_file config_loader'ом — см. docstring Facet.examples.
     negatives: list[str] = Field(default_factory=list, exclude=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_inline_negatives(cls, data: Any) -> Any:
+        # §4.2, §5.4 — тот же принцип, что и Facet._reject_inline_examples.
+        if isinstance(data, dict) and "negatives" in data:
+            raise ValueError(
+                "negatives задаётся только через negatives_file (§4.2) — "
+                "инлайн-список в topics.yaml больше не поддерживается"
+            )
+        return data
 
 
 def warn_if_facet_examples_below_recommended(

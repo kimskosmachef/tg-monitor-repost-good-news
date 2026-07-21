@@ -82,17 +82,34 @@ def test_topic_requires_at_least_one_facet() -> None:
         Topic.model_validate(_topic(facets=[]))
 
 
-def test_topic_facet_rejects_inline_examples() -> None:
-    # Старый формат (инлайн-список) — не просто необязателен, а ошибка:
-    # "examples" больше не поле схемы, а "examples_file" всё равно
-    # обязателен и не заменяется присутствием "examples".
+def test_topic_facet_rejects_inline_examples_even_with_examples_file_present() -> None:
+    # Старый формат (инлайн-список) — не молчаливый игнор и не переопределяется
+    # examples_file, а ошибка конфига (StrictModel: лишнее — ошибка). Файл
+    # examples_file присутствует и валиден сам по себе — падает именно из-за
+    # инлайн "examples", а не из-за отсутствующего examples_file.
     with pytest.raises(ValidationError):
-        Topic.model_validate(_topic(facets=[{"id": "facet_a", "examples": ["один пример"]}]))
+        Topic.model_validate(
+            _topic(
+                facets=[
+                    {
+                        "id": "facet_a",
+                        "examples_file": "facet_a.txt",
+                        "examples": ["один пример"],
+                    }
+                ]
+            )
+        )
+
+
+def test_topic_rejects_inline_negatives_even_with_negatives_file_present() -> None:
+    with pytest.raises(ValidationError):
+        Topic.model_validate({**_topic(), "negatives_file": "neg.txt", "negatives": ["бой"]})
 
 
 def test_facet_examples_loaded_field_not_required_and_excluded_from_dump() -> None:
-    # `examples` заполняется config_loader'ом после чтения файла (§4.2),
-    # это не часть входной схемы — по умолчанию пуст и не сериализуется.
+    # `examples` заполняется config_loader'ом после чтения файла (§4.2) —
+    # присвоением атрибута, а не через конструктор/model_validate, поэтому
+    # по умолчанию пуст и не сериализуется.
     facet = Facet.model_validate({"id": "facet_a", "examples_file": "facet_a.txt"})
     assert facet.examples == []
     assert "examples" not in facet.model_dump()
