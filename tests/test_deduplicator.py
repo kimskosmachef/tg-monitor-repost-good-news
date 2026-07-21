@@ -67,10 +67,26 @@ def _config_store(tmp_path: Path, window_hours: int = 48, threshold: float = 0.8
 
 
 class RecordingSink:
+    """Приёмник для тестов — подтверждает публикацию безусловно, как и
+    временная заглушка на месте будущего Publisher (§6 v2.3)."""
+
     def __init__(self) -> None:
         self.posts: list[Post] = []
 
-    async def handle(self, post: Post) -> None:
+    async def handle(self, post: Post, commit: Callable[[], None]) -> None:
+        self.posts.append(post)
+        commit()
+
+
+class NonCommittingSink:
+    """Приёмник, который получает пост, но не подтверждает публикацию —
+    имитирует запрет пересылки / ошибку отправки / снятие по лимиту (§6
+    v2.3): вектор не должен попасть в буфер дедупа."""
+
+    def __init__(self) -> None:
+        self.posts: list[Post] = []
+
+    async def handle(self, post: Post, commit: Callable[[], None]) -> None:
         self.posts.append(post)
 
 
@@ -190,9 +206,13 @@ def test_entries_older_than_window_are_pruned_during_operation(tmp_path: Path) -
     dedup, _config_store, _buffer_store, sink = _make_dedup(
         tmp_path,
         window_hours=1,
-        # Первое значение — прунинг при инициализации (буфер пуст, не важно),
-        # второе — первый handle(), третье — второй handle() два часа спустя.
-        now=_clock(FIXED_DATE, FIXED_DATE, FIXED_DATE + dt.timedelta(hours=2)),
+        # Проверка и фиксация — разные вызовы `now()` (§6 v2.3): первое
+        # значение — прунинг при инициализации (буфер пуст, не важно), второе
+        # и третье — check()/commit() первого handle() (пост проходит тему в
+        # момент FIXED_DATE), четвёртое — check() второго handle() два часа
+        # спустя (commit() второго handle() лишний вызов подхватит последнее
+        # значение — на исход теста не влияет).
+        now=_clock(FIXED_DATE, FIXED_DATE, FIXED_DATE, FIXED_DATE + dt.timedelta(hours=2)),
     )
 
     asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
@@ -340,3 +360,62 @@ def test_error_forwards_post_unfiltered_and_logs_error(
         and "message_id=1" in record.getMessage()
         for record in caplog.records
     )
+
+
+# --- проверка и фиксация разведены, §6 v2.3 -----------------------------------
+
+
+def test_check_does_not_mutate_buffer(tmp_path: Path) -> None:
+    dedup, _config_store, _buffer_store, _sink = _make_dedup(tmp_path)
+
+    survivors = dedup.check(_post(1, "src_a"), [_result("t1", _unit(1, 0))])
+
+    assert [r.topic_id for r in survivors] == ["t1"]
+    assert dedup._buffer.entries == []
+
+
+def test_without_commit_next_identical_post_is_not_duplicate(tmp_path: Path) -> None:
+    dedup, _config_store, _buffer_store, _sink = _make_dedup(tmp_path)
+
+    # Проверка прошла, но фиксации не было.
+    dedup.check(_post(1, "src_a"), [_result("t1", _unit(1, 0))])
+
+    # Идентичный вектор всё равно не считается дублем — вектор первого поста
+    # в буфер не попал.
+    survivors = dedup.check(_post(2, "src_b"), [_result("t1", _unit(1, 0))])
+    assert [r.topic_id for r in survivors] == ["t1"]
+
+
+def test_after_commit_next_identical_post_is_duplicate(tmp_path: Path) -> None:
+    dedup, _config_store, _buffer_store, _sink = _make_dedup(tmp_path)
+
+    first_post = _post(1, "src_a")
+    survivors = dedup.check(first_post, [_result("t1", _unit(1, 0))])
+    dedup.commit(first_post, survivors)
+
+    # Теперь идентичный вектор — дубль.
+    second_survivors = dedup.check(_post(2, "src_b"), [_result("t1", _unit(1, 0))])
+    assert second_survivors == []
+
+
+def test_sink_that_skips_commit_leaves_next_duplicate_unblocked(tmp_path: Path) -> None:
+    # §6 v2.3, обоснование в docs/spec.md: пост прошёл дедуп, но приёмник не
+    # подтвердил публикацию (аналог on_forward_forbidden: skip, ошибки
+    # отправки, снятия по лимиту) — вектор не должен попасть в буфер, иначе
+    # следующий настоящий дубль той же новости заглушится и она не выйдет
+    # вообще.
+    config_store = _config_store(tmp_path)
+    buffer_store = DedupBufferStore(tmp_path / "dedup-buffer.json")
+    sink = NonCommittingSink()
+    dedup = Deduplicator(
+        config_store=config_store,
+        buffer_store=buffer_store,
+        buffer=DedupBufferData(),
+        sink=sink,
+        now=_clock(FIXED_DATE),
+    )
+
+    asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
+    asyncio.run(dedup.handle(_post(2, "src_b"), [_result("t1", _unit(1, 0))]))
+
+    assert [p.message_id for p in sink.posts] == [1, 2]

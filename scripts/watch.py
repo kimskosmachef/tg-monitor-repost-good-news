@@ -20,11 +20,11 @@ from zoneinfo import ZoneInfo
 from telethon import TelegramClient
 
 from tg_monitor.config_store import ConfigStore
-from tg_monitor.deduplicator import Deduplicator
+from tg_monitor.deduplicator import CommittingLoggingSink, Deduplicator
 from tg_monitor.embedder import SentenceTransformerEmbedder
 from tg_monitor.logging_setup import setup_logging
 from tg_monitor.matcher import Matcher, MatchingSink
-from tg_monitor.reader import LoggingSink, TelegramReader, run_with_graceful_shutdown
+from tg_monitor.reader import TelegramReader, run_with_graceful_shutdown
 from tg_monitor.state import (
     DedupBufferStore,
     StateStore,
@@ -78,12 +78,17 @@ async def _main() -> None:
     buffer_store = DedupBufferStore(default_dedup_buffer_path(args.state))
     buffer = buffer_store.load()
 
-    # Reader → MatchingSink (§5) → Deduplicator (§6) → LoggingSink.
+    # Reader → MatchingSink (§5) → Deduplicator (§6) → CommittingLoggingSink.
+    # §6 v2.3: фиксация вектора в буфере дедупа отделена от проверки и
+    # вызывается только после подтверждённой публикации. Publisher'а пока нет
+    # (пакет 5), поэтому эту роль временно играет логирующий приёмник — он
+    # подтверждает публикацию безусловно, в отличие от будущего Publisher,
+    # который вызовет `commit` только на успешный форвард.
     deduplicator = Deduplicator(
         config_store=config_store,
         buffer_store=buffer_store,
         buffer=buffer,
-        sink=LoggingSink(tz=ZoneInfo(bundle.config.logging.timezone)),
+        sink=CommittingLoggingSink(tz=ZoneInfo(bundle.config.logging.timezone)),
     )
     matching_sink = MatchingSink(matcher=matcher, sink=deduplicator)
 

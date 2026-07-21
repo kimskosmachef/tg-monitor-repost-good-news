@@ -11,6 +11,15 @@
 грани (см. `matcher._winning_chunk_vector`) — тем самым чанком, который решил
 прохождение темы. Он же самое точное представление "о чём этот пост для этой
 темы", доступное без повторного обращения к эмбеддеру.
+
+§6 v2.3: проверка (`check`) и фиксация (`commit`) — разные операции. `check`
+только читает буфер и решает, дубль пост или нет. `commit` добавляет векторы
+победивших результатов в буфер и обязана вызываться лишь после подтверждённой
+публикации — иначе пост, прошедший дедуп, но не опубликованный (запрет
+пересылки, ошибка отправки, снятие по лимиту), заглушит следующий настоящий
+дубль той же новости. Publisher'а пока нет (пакет 5), поэтому в `handle` роль
+"подтверждения публикации" играет приёмник (`Sink`): он получает `post` и
+функцию `commit` и обязан вызвать её сам, только если публикация состоялась.
 """
 
 from __future__ import annotations
@@ -19,6 +28,7 @@ import datetime as dt
 import logging
 from collections.abc import Callable
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -26,15 +36,43 @@ from tg_monitor.config_store import ConfigStore
 from tg_monitor.embedder import Vector
 from tg_monitor.matcher import MatchResult
 from tg_monitor.models import Post
+from tg_monitor.reader import LoggingSink
 from tg_monitor.state import DedupBufferData, DedupBufferStore, DedupEntry
 
 logger = logging.getLogger(__name__)
 
 
 class Sink(Protocol):
-    """Приёмник постов, переживших дедуп — тот же структурный протокол, что `reader.Sink`."""
+    """Приёмник постов, переживших дедуп.
 
-    async def handle(self, post: Post) -> None: ...
+    В отличие от `reader.Sink` получает вторым аргументом `commit` — функцию
+    без аргументов, которую приёмник обязан вызвать сам, и только если пост
+    в итоге опубликован (§6 v2.3). Не вызвал — вектор в буфер дедупа не
+    попадёт, и следующий такой же пост дублем считаться не будет. В пакете 5
+    эту роль займёт Publisher, вызывая `commit` на успешный форвард; здесь —
+    временная заглушка (логирующий приёмник), которая считает публикацию
+    состоявшейся безусловно.
+    """
+
+    async def handle(self, post: Post, commit: Callable[[], None]) -> None: ...
+
+
+class CommittingLoggingSink:
+    """Заглушка на месте Publisher (пакет 5, §6 v2.3).
+
+    Оборачивает `reader.LoggingSink`: логирует пост как раньше и сразу же
+    вызывает `commit` — публикация в режиме наблюдения считается состоявшейся
+    безусловно. В пакете 5 эту роль займёт настоящий Publisher: он вызовет
+    `commit` только на успешный форвард (не на любую попытку), поэтому
+    поведение здесь — временное и заведомо более оптимистичное.
+    """
+
+    def __init__(self, log: logging.Logger | None = None, tz: ZoneInfo | None = None) -> None:
+        self._inner = LoggingSink(log, tz)
+
+    async def handle(self, post: Post, commit: Callable[[], None]) -> None:
+        await self._inner.handle(post)
+        commit()
 
 
 def _cosine(a: Vector, b: Vector) -> float:
@@ -51,7 +89,7 @@ class Deduplicator:
     Разделение не косметическое: `state.json` переписывается на каждый пост
     и должен оставаться маленьким, а буфер дедупа — это сотни векторов,
     единицы мегабайт, и пишется он только когда меняется составом (см.
-    `_filter_duplicates`), а не на каждый обработанный пост.
+    `commit`), а не на каждый обработанный пост.
     """
 
     def __init__(
@@ -81,7 +119,8 @@ class Deduplicator:
         self._prune(self._now(), window)
 
     async def handle(self, post: Post, results: list[MatchResult]) -> None:
-        """Отфильтровать дубли из `results` и передать пост дальше, если что-то осталось.
+        """Проверить `results` на дубли и передать выжившее приёмнику, который
+        сам решает, публиковать ли пост и, если да — вызвать `commit`.
 
         §9, пункт 7 промпта: сбой дедупа не должен ронять обработку и не
         должен отбрасывать пост — пропустить дальше немодифицированным хуже,
@@ -89,7 +128,7 @@ class Deduplicator:
         логируется на ERROR с id поста.
         """
         try:
-            survivors = self._filter_duplicates(post, results)
+            survivors = self.check(post, results)
         except Exception:
             self._logger.exception(
                 "ошибка дедупликации, пост передан дальше без проверки на дубль: "
@@ -100,18 +139,25 @@ class Deduplicator:
             survivors = results
 
         if survivors:
-            await self._sink.handle(post)
 
-    def _filter_duplicates(self, post: Post, results: list[MatchResult]) -> list[MatchResult]:
+            def _commit(survivors: list[MatchResult] = survivors) -> None:
+                self.commit(post, survivors)
+
+            await self._sink.handle(post, _commit)
+
+    def check(self, post: Post, results: list[MatchResult]) -> list[MatchResult]:
+        """Проверка на дубль — §6 v2.3: только читает буфер, ничего не пишет.
+
+        Возвращает результаты, не признанные дублем. Вызывающий код решает,
+        когда (и решает ли вообще) звать `commit` с этим же списком.
+        """
         bundle = self._config_store.get()
         window = dt.timedelta(hours=bundle.config.runtime.dedup_window_hours)
         threshold = bundle.config.runtime.dedup_threshold
-        now = self._now()
 
-        self._prune(now, window)
+        self._prune(self._now(), window)
 
         survivors: list[MatchResult] = []
-        new_entries: list[DedupEntry] = []
         for result in results:
             duplicate = self._find_duplicate(result.topic_id, result.vector, threshold)
             if duplicate is not None:
@@ -131,25 +177,34 @@ class Deduplicator:
                 )
                 continue
             survivors.append(result)
-            new_entries.append(
-                DedupEntry(
-                    topic_id=result.topic_id,
-                    source_id=post.source_id,
-                    message_id=post.message_id,
-                    vector=result.vector.tolist(),
-                    ts=now,
-                )
+        return survivors
+
+    def commit(self, post: Post, results: list[MatchResult]) -> None:
+        """Фиксация — §6 v2.3: добавить векторы `results` в буфер и сохранить.
+
+        Вызывается только после подтверждённой публикации, не в момент
+        прохождения дедупа — иначе пост, прошедший `check`, но не
+        опубликованный, заглушит следующий настоящий дубль той же новости.
+        """
+        if not results:
+            return
+
+        now = self._now()
+        new_entries = [
+            DedupEntry(
+                topic_id=result.topic_id,
+                source_id=post.source_id,
+                message_id=post.message_id,
+                vector=result.vector.tolist(),
+                ts=now,
             )
+            for result in results
+        ]
 
         # §8 v2.2, пункт 2 промпта: файл переписывается только когда буфер
-        # реально меняется составом, то есть пост прошёл тему. Отсеянный
-        # пост (survivors пуст, new_entries пуст) записи не вызывает — даже
-        # если чистка просроченных записей выше что-то из буфера убрала.
-        if new_entries:
-            self._buffer.entries.extend(new_entries)
-            self._buffer_store.save(self._buffer)
-
-        return survivors
+        # реально меняется составом — то есть здесь, при фиксации.
+        self._buffer.entries.extend(new_entries)
+        self._buffer_store.save(self._buffer)
 
     def _find_duplicate(
         self, topic_id: str, vector: Vector, threshold: float
