@@ -174,6 +174,22 @@ def test_parse_examples_text_empty_file_has_no_entries() -> None:
     assert parse_examples_text("") == []
 
 
+def test_load_topics_handles_crlf_line_endings_in_examples_file(tmp_path: Path) -> None:
+    # §4.2 мотивирован устойчивостью к вставке через буфер обмена — файл,
+    # сохранённый с CRLF (например, после правки на Windows), должен
+    # разбираться так же, как с \n: Path.read_text() сама нормализует
+    # переносы строк (universal newlines) до parse_examples_text.
+    path = tmp_path / "topics.yaml"
+    path.write_text(yaml.safe_dump(MINIMAL_TOPICS), encoding="utf-8")
+    examples_path = tmp_path / "examples" / "facet_a.txt"
+    examples_path.parent.mkdir(parents=True, exist_ok=True)
+    examples_path.write_bytes("первый\r\n---\r\nвторой".encode())
+
+    topics = load_topics(path)
+
+    assert topics[0].facets[0].examples == ["первый", "второй"]
+
+
 def test_load_sources_valid(tmp_path: Path) -> None:
     path = tmp_path / "sources.yaml"
     path.write_text(yaml.safe_dump(MINIMAL_SOURCES), encoding="utf-8")
