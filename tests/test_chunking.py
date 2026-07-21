@@ -69,3 +69,31 @@ def test_whitespace_around_paragraphs_is_stripped() -> None:
     text = "  первый абзац с пробелами  \n\n  второй абзац с пробелами  "
     chunks = chunk_text(text, min_chunk_chars=MIN, max_chunk_chars=1000)
     assert chunks == ["первый абзац с пробелами", "второй абзац с пробелами"]
+
+
+# --- разрез длинного абзаца по границе предложения/слова, §5.2 v1.8 ---------
+
+
+def test_long_paragraph_splits_on_sentence_boundary_in_last_third() -> None:
+    # MAX=30, последняя треть — символы [20:30). Точка на позиции 24 (внутри
+    # трети) — режем сразу после неё, а не по символу на 30-й позиции.
+    first = "а" * 24 + "." + "б" * 5  # длина 30: точка на индексе 24
+    text = f"{first} хвост абзаца, который идёт дальше"
+    chunks = chunk_text(text, min_chunk_chars=MIN, max_chunk_chars=MAX)
+    assert chunks[0] == "а" * 24 + "."
+    assert chunks[1].startswith("б" * 5)
+
+
+def test_long_paragraph_splits_on_word_boundary_without_sentence_end() -> None:
+    # Нет точки/!/?/… нигде в окне — ищем последний пробел во всём окне
+    # (не только в последней трети) и режем по нему, без разрыва слова.
+    text = "слово " * 6 + "хвост"  # 41 символ, без точек
+    chunks = chunk_text(text, min_chunk_chars=MIN, max_chunk_chars=MAX)
+    assert chunks == ["слово слово слово слово слово", "слово хвост"]
+
+
+def test_long_word_without_any_boundary_is_hard_cut_by_char() -> None:
+    # Слово само длиннее лимита — единственный случай разреза по символу.
+    text = "ы" * 75
+    chunks = chunk_text(text, min_chunk_chars=MIN, max_chunk_chars=MAX)
+    assert chunks == ["ы" * MAX, "ы" * MAX, "ы" * (75 - 2 * MAX)]

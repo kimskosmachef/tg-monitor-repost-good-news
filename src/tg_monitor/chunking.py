@@ -9,6 +9,10 @@
 
 from __future__ import annotations
 
+# §5.2: разрыв абзаца по предложению — только эти символы считаются концом
+# предложения (многоточие включено отдельным символом и тройкой точек сразу).
+_SENTENCE_END_CHARS = ".!?…"
+
 
 def chunk_text(text: str, *, min_chunk_chars: int, max_chunk_chars: int) -> list[str]:
     """Разбить текст поста на чанки по абзацам — §5.2.
@@ -50,7 +54,38 @@ def _merge_short_paragraphs(paragraphs: list[str], min_chars: int) -> list[str]:
 
 
 def _split_long_paragraph(paragraph: str, max_chars: int) -> list[str]:
-    # Длиннее max_chunk_chars — режется принудительно по этому лимиту (§5.2).
+    # Длиннее max_chunk_chars — режется принудительно (§5.2), но не всегда
+    # ровно по лимиту символов: сперва пробуем границу предложения в
+    # последней трети окна, потом границу слова во всём окне, и только если
+    # ни одной границы нет (само слово длиннее лимита) — режем по символу.
     if len(paragraph) <= max_chars:
         return [paragraph]
-    return [paragraph[i : i + max_chars] for i in range(0, len(paragraph), max_chars)]
+    chunks: list[str] = []
+    remaining = paragraph
+    while len(remaining) > max_chars:
+        cut = _find_cut(remaining, max_chars)
+        chunks.append(remaining[:cut])
+        remaining = remaining[cut:].lstrip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks
+
+
+def _find_cut(text: str, max_chars: int) -> int:
+    window = text[:max_chars]
+
+    third_start = max_chars - max_chars // 3
+    sentence_cut = -1
+    for i in range(third_start, max_chars):
+        if window[i] in _SENTENCE_END_CHARS:
+            sentence_cut = i
+    if sentence_cut != -1:
+        return sentence_cut + 1
+
+    word_cut = window.rfind(" ")
+    if word_cut != -1:
+        return word_cut
+
+    # Само слово длиннее max_chars — единственный случай, где режем по
+    # символу (§5.2: разрыв посреди слова портит токенизацию).
+    return max_chars
