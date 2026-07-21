@@ -25,9 +25,16 @@ from tg_monitor.models import Topic
 
 
 class DedupEntry(BaseModel):
-    """Один вектор в кольцевом буфере дедупа — §6."""
+    """Один вектор в кольцевом буфере дедупа — §6.
+
+    `source_id`/`message_id` — идентификатор опубликованного поста, вектор
+    которого здесь хранится: без них лог отброшенного дубля (§6, пакет 4,
+    пункт 5) не может назвать, с каким постом произошло совпадение.
+    """
 
     topic_id: str
+    source_id: str
+    message_id: int
     vector: list[float]
     ts: dt.datetime
 

@@ -27,13 +27,21 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class MatchResult:
-    """Результат отбора поста по одной теме — §5, пункт 8 промпта пакета 3."""
+    """Результат отбора поста по одной теме — §5, пункт 8 промпта пакета 3.
+
+    `vector` — пакет 4, §6: вектор чанка, давший максимальный score по
+    выигравшей грани темы (тот же чанк, что определил `raw_score` и,
+    соответственно, прохождение темы). Используется дальше по цепочке
+    Deduplicator'ом как вектор поста для этой темы — без повторного
+    эмбеддинга (§6, пакет 4, пункт 3).
+    """
 
     topic_id: str
     facet_id: str
     raw_score: float
     final_score: float
     centroid_version: str
+    vector: Vector
 
 
 @dataclass(frozen=True)
@@ -132,6 +140,16 @@ def negative_score(centroids: TopicCentroids, chunk_vectors: list[Vector]) -> fl
     if centroids.negative is None:
         return 0.0
     return max(_cosine(v, centroids.negative) for v in chunk_vectors)
+
+
+def _winning_chunk_vector(centroid: Vector, chunk_vectors: list[Vector]) -> Vector:
+    """Чанк поста, давший максимальный косинус с центроидом грани — пакет 4, §6.
+
+    Отдельный проход только по чанкам победившей грани (их немного, это не
+    повторный эмбеддинг) — нужен, чтобы Deduplicator получил именно тот
+    вектор, который решил прохождение темы, не пересчитывая ничего заново.
+    """
+    return max(chunk_vectors, key=lambda v: _cosine(v, centroid))
 
 
 def _best_facet(centroids: TopicCentroids, chunk_vectors: list[Vector]) -> tuple[str, float]:
@@ -250,6 +268,7 @@ class Matcher:
     ) -> MatchResult | None:
         centroids = self._centroids.get(topic)
         facet_id, raw_score = _best_facet(centroids, chunk_vectors)
+        winning_vector = _winning_chunk_vector(centroids.facets[facet_id], chunk_vectors)
         # §5.6: boost надбавляется к score, но не подменяет сырой score в логах
         # — иначе калибровка порога поедет.
         final_score = raw_score + boost
@@ -288,21 +307,27 @@ class Matcher:
             raw_score=raw_score,
             final_score=final_score,
             centroid_version=centroids.version,
+            vector=winning_vector,
         )
 
 
-class Sink(Protocol):
-    """Приёмник постов ниже по цепочке — тот же структурный протокол, что `reader.Sink`."""
+class MatchSink(Protocol):
+    """Приёмник поста вместе с результатами отбора — между Matcher и Deduplicator (пакет 4).
 
-    async def handle(self, post: Post) -> None: ...
+    Отличается от `reader.Sink`/`matcher.Sink` (пост без контекста): здесь
+    приёмнику нужны сработавшие темы и их векторы (§6) — раньше `MatchingSink`
+    передавала дальше только `Post`, `results` терялись после логирования.
+    """
+
+    async def handle(self, post: Post, results: list[MatchResult]) -> None: ...
 
 
 class MatchingSink:
     """Встаёт между Reader и sink — §3, §5, пункт 9 промпта пакета 3.
 
-    Publisher (пакет 5) ещё не существует, поэтому пост, прошедший хотя бы
-    одну тему, просто передаётся дальше как есть — какой sink стоит ниже
-    (сейчас `LoggingSink`), решает вызывающий код. Здесь фиксируется только
+    Пост, прошедший хотя бы одну тему, передаётся дальше вместе со списком
+    результатов (`MatchSink`, пакет 4) — какой sink стоит ниже (Deduplicator,
+    затем `LoggingSink`), решает вызывающий код. Здесь фиксируется только
     решение "прошёл/не прошёл" и его причина в логе (CLAUDE.md: молчаливых
     потерь постов быть не должно).
     """
@@ -310,7 +335,7 @@ class MatchingSink:
     def __init__(
         self,
         matcher: Matcher,
-        sink: Sink,
+        sink: MatchSink,
         log: logging.Logger | None = None,
     ) -> None:
         self._matcher = matcher
@@ -381,7 +406,7 @@ class MatchingSink:
                 post.source_id,
                 post.message_id,
             )
-        await self._sink.handle(post)
+        await self._sink.handle(post, results)
 
     def _log_scoring_error(self, reason: str, post: Post) -> None:
         self._logger.exception(

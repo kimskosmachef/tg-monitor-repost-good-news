@@ -1,0 +1,303 @@
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import logging
+from collections.abc import Callable
+from pathlib import Path
+
+import numpy as np
+import pytest
+import yaml
+
+from tg_monitor.config_store import ConfigStore
+from tg_monitor.deduplicator import Deduplicator
+from tg_monitor.embedder import Vector
+from tg_monitor.matcher import MatchResult
+from tg_monitor.models import Post
+from tg_monitor.state import DedupEntry, StateData, StateStore
+
+FIXED_DATE = dt.datetime(2026, 7, 20, 12, 0, tzinfo=dt.UTC)
+
+
+def _unit(*components: float) -> Vector:
+    vector = np.array(components, dtype=np.float32)
+    return vector / np.linalg.norm(vector)
+
+
+def _result(topic_id: str, vector: Vector, facet_id: str = "f1") -> MatchResult:
+    return MatchResult(
+        topic_id=topic_id,
+        facet_id=facet_id,
+        raw_score=0.9,
+        final_score=0.9,
+        centroid_version="v1",
+        vector=vector,
+    )
+
+
+def _post(message_id: int, source_id: str = "src_a") -> Post:
+    return Post(
+        message_id=message_id, source_id=source_id, date=FIXED_DATE, text="текст", origin="live"
+    )
+
+
+def _config_store(tmp_path: Path, window_hours: int = 48, threshold: float = 0.85) -> ConfigStore:
+    # Deduplicator не читает topics.yaml/sources.yaml — минимальные пустые
+    # списки, всё внимание на runtime.dedup_window_hours/dedup_threshold.
+    config = {
+        "account": {"session_path": "~/.tg-monitor/monitor.session"},
+        "service_chat": "@svc",
+        "sources_file": "sources.yaml",
+        "topics_file": "topics.yaml",
+        "runtime": {
+            "catchup_interval_min": 15,
+            "dedup_window_hours": window_hours,
+            "dedup_threshold": threshold,
+            "publish_delay_sec": 3,
+            "max_post_age_min": 120,
+            "rate_limit_per_hour": None,
+            "forward_reposts": True,
+        },
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    (tmp_path / "topics.yaml").write_text("[]", encoding="utf-8")
+    (tmp_path / "sources.yaml").write_text("[]", encoding="utf-8")
+    return ConfigStore(tmp_path / "config.yaml")
+
+
+class RecordingSink:
+    def __init__(self) -> None:
+        self.posts: list[Post] = []
+
+    async def handle(self, post: Post) -> None:
+        self.posts.append(post)
+
+
+def _clock(*values: dt.datetime) -> Callable[[], dt.datetime]:
+    """Фиксированные "текущие" моменты времени, по одному на вызов `now()`."""
+    iterator = iter(values)
+
+    def _now() -> dt.datetime:
+        try:
+            return next(iterator)
+        except StopIteration:
+            return values[-1]
+
+    return _now
+
+
+def _make_dedup(
+    tmp_path: Path,
+    state: StateData | None = None,
+    window_hours: int = 48,
+    threshold: float = 0.85,
+    now: Callable[[], dt.datetime] | None = None,
+    sink: RecordingSink | None = None,
+) -> tuple[Deduplicator, ConfigStore, StateStore, RecordingSink]:
+    config_store = _config_store(tmp_path, window_hours=window_hours, threshold=threshold)
+    state_store = StateStore(tmp_path / "state.json")
+    resolved_state = state if state is not None else StateData()
+    resolved_sink = sink or RecordingSink()
+    dedup = Deduplicator(
+        config_store=config_store,
+        state_store=state_store,
+        state=resolved_state,
+        sink=resolved_sink,
+        now=now or _clock(FIXED_DATE),
+    )
+    return dedup, config_store, state_store, resolved_sink
+
+
+# --- попадание в окно: дубль глушится, §6, пункт 1 промпта -------------------
+
+
+def test_similar_post_within_window_is_dropped(tmp_path: Path) -> None:
+    dedup, _config_store, _state_store, sink = _make_dedup(
+        tmp_path, now=_clock(FIXED_DATE, FIXED_DATE, FIXED_DATE + dt.timedelta(minutes=5))
+    )
+
+    asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
+    # Похожий, но не идентичный вектор — тот же порядок величины, что и
+    # реальный повтор новости из другого источника.
+    asyncio.run(dedup.handle(_post(2, "src_b"), [_result("t1", _unit(0.99, 0.14))]))
+
+    assert [p.message_id for p in sink.posts] == [1]
+
+
+def test_dissimilar_post_is_not_dropped(tmp_path: Path) -> None:
+    dedup, _config_store, _state_store, sink = _make_dedup(tmp_path)
+
+    asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
+    asyncio.run(dedup.handle(_post(2, "src_b"), [_result("t1", _unit(0, 1))]))
+
+    assert [p.message_id for p in sink.posts] == [1, 2]
+
+
+def test_dropped_duplicate_is_logged_with_similarity_and_matched_post(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    dedup, _config_store, _state_store, _sink = _make_dedup(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="tg_monitor.deduplicator"):
+        asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
+        asyncio.run(dedup.handle(_post(2, "src_b"), [_result("t1", _unit(1, 0))]))
+
+    assert any(
+        "дубль отброшен" in r.getMessage()
+        and "тема=t1" in r.getMessage()
+        and "src_b" in r.getMessage()
+        and "message_id=2" in r.getMessage()
+        and "совпадает_с_source=src_a" in r.getMessage()
+        and "совпадает_с_message_id=1" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+# --- разделение буферов по темам, §6, пункт 2 промпта ------------------------
+
+
+def test_buffers_are_separated_by_topic(tmp_path: Path) -> None:
+    dedup, _config_store, _state_store, sink = _make_dedup(tmp_path)
+
+    asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
+    # Тот же вектор, другая тема — другая аудитория, глушить нельзя (§6).
+    asyncio.run(dedup.handle(_post(2, "src_b"), [_result("t2", _unit(1, 0))]))
+
+    assert [p.message_id for p in sink.posts] == [1, 2]
+
+
+def test_one_post_can_be_duplicate_in_one_topic_and_new_in_another(tmp_path: Path) -> None:
+    dedup, _config_store, _state_store, sink = _make_dedup(tmp_path)
+
+    asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
+    asyncio.run(
+        dedup.handle(
+            _post(2, "src_b"),
+            [_result("t1", _unit(1, 0)), _result("t2", _unit(1, 0))],
+        )
+    )
+
+    # Пост 2 дублирует t1, но для t2 это первое попадание — пост должен
+    # пройти дальше (в t2 он не дубль).
+    assert [p.message_id for p in sink.posts] == [1, 2]
+
+
+# --- вычистка старых записей, §8, пункт 4 промпта -----------------------------
+
+
+def test_entries_older_than_window_are_pruned_during_operation(tmp_path: Path) -> None:
+    dedup, _config_store, _state_store, sink = _make_dedup(
+        tmp_path,
+        window_hours=1,
+        # Первое значение — прунинг при инициализации (буфер пуст, не важно),
+        # второе — первый handle(), третье — второй handle() два часа спустя.
+        now=_clock(FIXED_DATE, FIXED_DATE, FIXED_DATE + dt.timedelta(hours=2)),
+    )
+
+    asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
+    # Второй вызов — два часа спустя, окно всего час: первая запись должна
+    # быть вычищена, и идентичный вектор больше не считается дублем.
+    asyncio.run(dedup.handle(_post(2, "src_b"), [_result("t1", _unit(1, 0))]))
+
+    assert [p.message_id for p in sink.posts] == [1, 2]
+
+
+def test_stale_entries_are_pruned_on_load(tmp_path: Path) -> None:
+    stale = DedupEntry(
+        topic_id="t1",
+        source_id="src_old",
+        message_id=1,
+        vector=[1.0, 0.0],
+        ts=FIXED_DATE - dt.timedelta(hours=100),
+    )
+    state = StateData(dedup_buffer=[stale])
+
+    dedup, _config_store, state_store, _sink = _make_dedup(
+        tmp_path, state=state, window_hours=48, now=_clock(FIXED_DATE)
+    )
+
+    assert dedup._state.dedup_buffer == []
+    assert state_store.load().dedup_buffer == []
+
+
+# --- переживание перезапуска, §8 ---------------------------------------------
+
+
+def test_buffer_survives_restart(tmp_path: Path) -> None:
+    config_store = _config_store(tmp_path)
+    state_path = tmp_path / "state.json"
+
+    state_store_a = StateStore(state_path)
+    state_a = state_store_a.load()
+    sink_a = RecordingSink()
+    dedup_a = Deduplicator(
+        config_store=config_store,
+        state_store=state_store_a,
+        state=state_a,
+        sink=sink_a,
+        now=_clock(FIXED_DATE),
+    )
+    asyncio.run(dedup_a.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
+    assert sink_a.posts
+
+    # Новый процесс: свежий StateStore и state, загруженные с диска.
+    state_store_b = StateStore(state_path)
+    state_b = state_store_b.load()
+    sink_b = RecordingSink()
+    dedup_b = Deduplicator(
+        config_store=config_store,
+        state_store=state_store_b,
+        state=state_b,
+        sink=sink_b,
+        now=_clock(FIXED_DATE + dt.timedelta(minutes=10)),
+    )
+    asyncio.run(dedup_b.handle(_post(2, "src_b"), [_result("t1", _unit(1, 0))]))
+
+    assert sink_b.posts == []  # признан дублем поста 1 из предыдущего запуска
+
+
+# --- поведение при ошибке, §9, пункт 7 промпта -------------------------------
+
+
+def test_error_forwards_post_unfiltered_and_logs_error(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    config_store = _config_store(tmp_path)
+    state_store = StateStore(tmp_path / "state.json")
+    # Вектор другой размерности в буфере — имитирует смену модели эмбеддера
+    # без очистки старого буфера: сравнение обязано упасть на несовпадении
+    # размерностей, а не молча всё отбросить и не уронить обработку поста.
+    state = StateData(
+        dedup_buffer=[
+            DedupEntry(
+                topic_id="t1",
+                source_id="src_old",
+                message_id=0,
+                vector=[1.0, 0.0, 0.0],
+                ts=FIXED_DATE,
+            )
+        ]
+    )
+    sink = RecordingSink()
+    dedup = Deduplicator(
+        config_store=config_store,
+        state_store=state_store,
+        state=state,
+        sink=sink,
+        now=_clock(FIXED_DATE),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="tg_monitor.deduplicator"):
+        asyncio.run(dedup.handle(_post(1, "src_a"), [_result("t1", _unit(1, 0))]))
+
+    # Хуже потерять новость, чем допустить дубль — сбой дедупа не должен
+    # отбрасывать пост.
+    assert [p.message_id for p in sink.posts] == [1]
+    assert any(
+        record.levelno == logging.ERROR
+        and "ошибка дедупликации" in record.getMessage()
+        and "src_a" in record.getMessage()
+        and "message_id=1" in record.getMessage()
+        for record in caplog.records
+    )

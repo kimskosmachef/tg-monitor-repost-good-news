@@ -1,8 +1,8 @@
-"""Режим наблюдения (пакеты 2-3): Reader + Matcher, без публикации.
+"""Режим наблюдения (пакеты 2-4): Reader + Matcher + Deduplicator, без публикации.
 
-Пост идёт Reader → MatchingSink (отбор по темам, §5) → LoggingSink —
-Publisher ещё нет (пакет 5). Не точка входа для боевого запуска под
-systemd: она появится в пакете 7. Session-файл должен уже существовать
+Пост идёт Reader → MatchingSink (отбор по темам, §5) → Deduplicator (§6) →
+LoggingSink — Publisher ещё нет (пакет 5). Не точка входа для боевого запуска
+под systemd: она появится в пакете 7. Session-файл должен уже существовать
 (см. scripts/login.py).
 
 Запуск:
@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 from telethon import TelegramClient
 
 from tg_monitor.config_store import ConfigStore
+from tg_monitor.deduplicator import Deduplicator
 from tg_monitor.embedder import SentenceTransformerEmbedder
 from tg_monitor.logging_setup import setup_logging
 from tg_monitor.matcher import Matcher, MatchingSink
@@ -57,19 +58,27 @@ async def _main() -> None:
         device=bundle.config.embedder.device,
     )
     matcher = Matcher(embedder=embedder, config_store=config_store)
-    matching_sink = MatchingSink(
-        matcher=matcher,
-        sink=LoggingSink(tz=ZoneInfo(bundle.config.logging.timezone)),
-    )
 
     # §8 v1.9: state.json читается один раз здесь — сверка версий центроидов
-    # идёт по этому же объекту, который затем передаётся в Reader как есть,
-    # без повторного чтения с диска (было хрупко: порядок load() в watch.py
-    # и в Reader имел значение сам по себе).
+    # идёт по этому же объекту, который затем передаётся в Reader и
+    # Deduplicator как есть, без повторного чтения с диска (было хрупко:
+    # порядок load() в watch.py и в Reader имел значение сам по себе). Оба
+    # компонента делят один объект `state` и один `StateStore`, независимо
+    # сохраняя его при своих изменениях (last_message_id и dedup_buffer
+    # соответственно).
     state_store = StateStore(args.state)
     state = state_store.load()
     reconcile_topic_centroid_versions(state, bundle.topics, logger)
     state_store.save(state)
+
+    # Reader → MatchingSink (§5) → Deduplicator (§6) → LoggingSink.
+    deduplicator = Deduplicator(
+        config_store=config_store,
+        state_store=state_store,
+        state=state,
+        sink=LoggingSink(tz=ZoneInfo(bundle.config.logging.timezone)),
+    )
+    matching_sink = MatchingSink(matcher=matcher, sink=deduplicator)
 
     reader = TelegramReader(
         client=client,

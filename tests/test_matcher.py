@@ -15,7 +15,7 @@ import yaml
 from tests.conftest import write_examples_files
 from tg_monitor.config_store import ConfigStore
 from tg_monitor.embedder import Vector
-from tg_monitor.matcher import CentroidStore, Matcher, MatchingSink
+from tg_monitor.matcher import CentroidStore, Matcher, MatchingSink, MatchResult
 from tg_monitor.models import Facet, Post, Topic
 
 FIXED_DATE = dt.datetime(2026, 7, 20, 15, 0, tzinfo=dt.UTC)
@@ -464,9 +464,11 @@ def test_matcher_one_post_can_pass_several_topics(tmp_path: Path) -> None:
 class RecordingSink:
     def __init__(self) -> None:
         self.posts: list[Post] = []
+        self.results: list[list[MatchResult]] = []
 
-    async def handle(self, post: Post) -> None:
+    async def handle(self, post: Post, results: list[MatchResult]) -> None:
         self.posts.append(post)
+        self.results.append(results)
 
 
 def test_matching_sink_forwards_matched_post_once(tmp_path: Path) -> None:

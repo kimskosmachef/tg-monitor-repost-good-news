@@ -141,6 +141,8 @@ def test_save_then_load_roundtrip(tmp_path: Path) -> None:
         dedup_buffer=[
             DedupEntry(
                 topic_id="topic_one",
+                source_id="src_a",
+                message_id=42,
                 vector=[0.1, 0.2, 0.3],
                 ts=dt.datetime(2026, 7, 20, 12, 0, tzinfo=dt.UTC),
             )
