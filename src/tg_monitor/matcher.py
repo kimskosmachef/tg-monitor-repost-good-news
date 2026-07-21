@@ -266,7 +266,7 @@ class Matcher:
 
         self._logger.debug(
             "тема=%s грань=%s режим=%s raw=%.4f final=%.4f boost=%.4f "
-            "порог=%s мягкий_порог=%.4f прошёл=%s source=%s message_id=%s",
+            "порог=%s мягкий_порог=%.4f прошёл=%s source=%s message_id=%s text=%r",
             topic.id,
             facet_id,
             mode,
@@ -278,6 +278,7 @@ class Matcher:
             passed,
             post.source_id,
             post.message_id,
+            post.text,
         )
         if not passed:
             return None

@@ -509,6 +509,39 @@ def test_matching_sink_does_not_forward_unmatched_post(
     )
 
 
+def test_debug_log_includes_post_text_for_evaluated_posts(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # §5.5: калибровка порога нужна и по отсеянным постам — без текста
+    # отсеянного поста нельзя отличить верное отсеивание от ложного, поэтому
+    # DEBUG-лог обязан нести текст для каждой оценённой темы, прошла она или
+    # нет.
+    topics = [
+        _topic_dict(tmp_path, id_="passes", facets={"facet_a": ["пример а"]}, threshold=0.5),
+        _topic_dict(tmp_path, id_="rejects", facets={"facet_a": ["пример а"]}, threshold=0.99),
+    ]
+    config_store = _write_configs(tmp_path, topics)
+    embedder = DictEmbedder({"пример а": (1, 0), "текст поста": (1, 0)})
+    matcher = Matcher(embedder=embedder, config_store=config_store)
+    downstream = RecordingSink()
+    sink = MatchingSink(matcher=matcher, sink=downstream)
+
+    with caplog.at_level(logging.DEBUG, logger="tg_monitor.matcher"):
+        asyncio.run(sink.handle(_post("текст поста", source_id="src_a", message_id=42)))
+
+    debug_records = [
+        record.getMessage() for record in caplog.records if record.levelno == logging.DEBUG
+    ]
+    assert any(
+        "тема=passes" in msg and "'текст поста'" in msg and "src_a" in msg and "42" in msg
+        for msg in debug_records
+    )
+    assert any(
+        "тема=rejects" in msg and "'текст поста'" in msg and "src_a" in msg and "42" in msg
+        for msg in debug_records
+    )
+
+
 def test_matching_sink_does_not_forward_post_without_text(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
