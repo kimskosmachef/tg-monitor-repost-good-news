@@ -24,3 +24,10 @@ logging:
   level: INFO
   file: logs/tg-monitor.log
   timezone: Europe/Riga
+
+embedder:
+  model: paraphrase-multilingual-mpnet-base-v2
+  cache_dir: ~/.tg-monitor/models   # куда кладётся скачанная модель
+  device: cpu
+  max_chunk_chars: 400     # длиннее — режется принудительно (§5.2, спека v1.7)
+  min_chunk_chars: 40      # короче — приклеивается к соседнему (§5.2, пакет 3)

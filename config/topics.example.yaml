@@ -9,6 +9,7 @@
   target: "@target_channel_one"
   sources: all                   # или список id источников из sources.yaml
   threshold: null                 # null = shadow-режим, порог не откалиброван
+  soft_threshold: 0.2              # мягкий порог shadow-режима, см. §5.5 (спека v1.7)
   chunk_strategy: paragraph
   facets:
     - id: facet_a
@@ -28,6 +29,7 @@
   target: "@diaspora_business_good_channel"
   sources: all
   threshold: null                 # начинаем в shadow-режиме, см. §5.5
+  soft_threshold: 0.2              # мягкий порог shadow-режима, см. §5.5 (спека v1.7)
   chunk_strategy: paragraph
   facets:
     - id: entrepreneurship

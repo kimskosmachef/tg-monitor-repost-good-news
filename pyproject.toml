@@ -9,6 +9,14 @@ description = "Универсальный монитор Telegram-каналов
 requires-python = ">=3.12"
 # Единственный источник списка зависимостей: requirements.txt содержит
 # только "-e .", ничего не дублирует.
+#
+# torch — CPU-only, §10 docs/spec.md / CLAUDE.md ("torch только CPU"). Индекс
+# PyPI отдаёт под Linux сборку с бандлом CUDA (гигабайты впустую), поэтому
+# torch ставится ДО "pip install -e ." отдельной командой с CPU-индексом:
+#     pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.2"
+#     pip install -e .
+# Второй шаг видит версию torch уже удовлетворённой и не переустанавливает
+# его с обычного PyPI.
 dependencies = [
     "pyyaml>=6.0.1",
     "pydantic>=2.7",
@@ -17,6 +25,9 @@ dependencies = [
     "python-dotenv>=1.0",
     "ruamel.yaml>=0.18",
     "qrcode>=7.4",
+    "torch>=2.2",
+    "sentence-transformers>=3.0",
+    "numpy>=1.26",
 ]
 
 [tool.setuptools.packages.find]
@@ -25,6 +36,13 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# "slow" — интеграционный тест с реальной моделью (сеть, скачивание весов при
+# первом запуске). По умолчанию не запускается: `pytest -m slow`, чтобы
+# включить явно.
+addopts = "-m 'not slow'"
+markers = [
+    "slow: интеграционный тест с реальной эмбеддинг-моделью, не для обычного pytest-гейта",
+]
 
 [tool.ruff]
 target-version = "py312"

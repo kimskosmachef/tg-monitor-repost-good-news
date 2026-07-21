@@ -25,7 +25,7 @@ from telethon import errors, events
 from tg_monitor.config_store import ConfigStore
 from tg_monitor.models import Post, Source
 from tg_monitor.sources_registry import mark_source_unavailable
-from tg_monitor.state import StateStore
+from tg_monitor.state import StateData, StateStore
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +160,7 @@ class TelegramReader:
         client: TelegramClientLike,
         config_store: ConfigStore,
         state_store: StateStore,
+        state: StateData,
         sink: Sink,
         log: logging.Logger | None = None,
         now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
@@ -173,7 +174,12 @@ class TelegramReader:
         self._now = now
         self._sleeper = sleeper
 
-        self._state = state_store.load()
+        # §8 v1.9: state.json читается один раз вызывающим кодом (watch.py) —
+        # там же идёт сверка версий центроидов до старта Reader — и передаётся
+        # сюда уже загруженным, а не читается ещё раз с диска. Двойное чтение
+        # порознь в watch.py и Reader было хрупким: порядок вызовов имел
+        # значение, но ничего в сигнатурах его не гарантировало.
+        self._state = state
         self._entities: dict[str, Any] = {}
         self._live_handlers: dict[str, tuple[Callable[[Any], Awaitable[None]], Any]] = {}
         self._source_locks: dict[str, asyncio.Lock] = {}

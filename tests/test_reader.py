@@ -64,6 +64,7 @@ def _make_reader(
         client=client,
         config_store=config_store,
         state_store=state_store,
+        state=state_store.load(),
         sink=sink,
         now=lambda: now,
         sleeper=_instant_sleep,
@@ -514,7 +515,11 @@ def test_run_cancels_pending_background_tasks_on_shutdown(tmp_path: Path) -> Non
     state_store = StateStore(tmp_path / "state.json")
     sink = RecordingSink()
     reader = TelegramReader(
-        client=client, config_store=config_store, state_store=state_store, sink=sink
+        client=client,
+        config_store=config_store,
+        state_store=state_store,
+        state=state_store.load(),
+        sink=sink,
     )
 
     async def scenario() -> asyncio.Task[None]:
@@ -549,7 +554,11 @@ def test_run_with_graceful_shutdown_on_sigterm_logs_and_returns_cleanly(
     config_store = ConfigStore(tmp_path / "config.yaml")
     state_store = StateStore(tmp_path / "state.json")
     reader = TelegramReader(
-        client=client, config_store=config_store, state_store=state_store, sink=RecordingSink()
+        client=client,
+        config_store=config_store,
+        state_store=state_store,
+        state=state_store.load(),
+        sink=RecordingSink(),
     )
 
     async def scenario() -> None:

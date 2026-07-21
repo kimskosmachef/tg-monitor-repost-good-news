@@ -21,6 +21,10 @@ BOOST_MAX = 0.05
 # §5.1: рекомендованный минимум примеров на грань — рекомендация, не валидация.
 FACET_MIN_EXAMPLES = 8
 
+# §5.5: мягкий порог по умолчанию для тем в shadow-режиме (threshold: null).
+# Узаконено спекой v1.7 (было предложением пакета 3, см. отчёт по пакету).
+DEFAULT_SOFT_THRESHOLD = 0.2
+
 
 class StrictModel(BaseModel):
     """Общая база: лишние поля в конфиге — ошибка, а не молчаливый игнор."""
@@ -67,6 +71,9 @@ class Topic(StrictModel):
     target: str
     sources: Literal["all"] | list[str] = "all"
     threshold: float | None = None
+    # §5.5: применяется только пока threshold: null (shadow-режим) — отсекает
+    # явный шум, не заменяет калибровку. Узаконено спекой v1.7.
+    soft_threshold: float = DEFAULT_SOFT_THRESHOLD
     chunk_strategy: ChunkStrategy = "paragraph"
     facets: list[Facet] = Field(min_length=1)
     negatives: list[str] = Field(default_factory=list)
@@ -104,6 +111,28 @@ class LoggingConfig(StrictModel):
     timezone: str = "Europe/Riga"
 
 
+class EmbedderConfig(StrictModel):
+    """Секция `embedder` — §3, §4, §5.2 docs/spec.md."""
+
+    model: str = "paraphrase-multilingual-mpnet-base-v2"
+    cache_dir: str = "~/.tg-monitor/models"
+    device: str = "cpu"
+    # §5.2: длиннее — режется принудительно, короче — приклеивается к соседнему.
+    # 400 — под окно модели в 128 токенов (§5.2, спека v1.7): более длинный
+    # чанк токенизатор усекает молча, см. предупреждение в Embedder.
+    max_chunk_chars: int = Field(default=400, gt=0)
+    min_chunk_chars: int = Field(default=40, gt=0)
+
+    @model_validator(mode="after")
+    def _check_chunk_bounds(self) -> EmbedderConfig:
+        if self.min_chunk_chars >= self.max_chunk_chars:
+            raise ValueError(
+                f"min_chunk_chars ({self.min_chunk_chars}) должен быть меньше "
+                f"max_chunk_chars ({self.max_chunk_chars})"
+            )
+        return self
+
+
 class RuntimeConfig(StrictModel):
     """Секция `runtime` — §4."""
 
@@ -127,6 +156,7 @@ class Config(StrictModel):
     topics_file: str = "topics.yaml"
     runtime: RuntimeConfig
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
 
 
 class Post(BaseModel):
