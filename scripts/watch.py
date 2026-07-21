@@ -1,8 +1,8 @@
-"""Режим наблюдения (пакеты 2-3): Reader + Matcher, без публикации.
+"""Режим наблюдения (пакеты 2-4): Reader + Matcher + Deduplicator, без публикации.
 
-Пост идёт Reader → MatchingSink (отбор по темам, §5) → LoggingSink —
-Publisher ещё нет (пакет 5). Не точка входа для боевого запуска под
-systemd: она появится в пакете 7. Session-файл должен уже существовать
+Пост идёт Reader → MatchingSink (отбор по темам, §5) → Deduplicator (§6) →
+LoggingSink — Publisher ещё нет (пакет 5). Не точка входа для боевого запуска
+под systemd: она появится в пакете 7. Session-файл должен уже существовать
 (см. scripts/login.py).
 
 Запуск:
@@ -20,11 +20,17 @@ from zoneinfo import ZoneInfo
 from telethon import TelegramClient
 
 from tg_monitor.config_store import ConfigStore
+from tg_monitor.deduplicator import CommittingLoggingSink, Deduplicator
 from tg_monitor.embedder import SentenceTransformerEmbedder
 from tg_monitor.logging_setup import setup_logging
 from tg_monitor.matcher import Matcher, MatchingSink
-from tg_monitor.reader import LoggingSink, TelegramReader, run_with_graceful_shutdown
-from tg_monitor.state import StateStore, reconcile_topic_centroid_versions
+from tg_monitor.reader import TelegramReader, run_with_graceful_shutdown
+from tg_monitor.state import (
+    DedupBufferStore,
+    StateStore,
+    default_dedup_buffer_path,
+    reconcile_topic_centroid_versions,
+)
 from tg_monitor.telegram_env import load_api_credentials
 
 logger = logging.getLogger(__name__)
@@ -57,10 +63,6 @@ async def _main() -> None:
         device=bundle.config.embedder.device,
     )
     matcher = Matcher(embedder=embedder, config_store=config_store)
-    matching_sink = MatchingSink(
-        matcher=matcher,
-        sink=LoggingSink(tz=ZoneInfo(bundle.config.logging.timezone)),
-    )
 
     # §8 v1.9: state.json читается один раз здесь — сверка версий центроидов
     # идёт по этому же объекту, который затем передаётся в Reader как есть,
@@ -70,6 +72,25 @@ async def _main() -> None:
     state = state_store.load()
     reconcile_topic_centroid_versions(state, bundle.topics, logger)
     state_store.save(state)
+
+    # §8 v2.2: буфер дедупа — отдельный файл рядом со state.json, путь не
+    # заводится отдельным параметром запуска, а выводится из --state.
+    buffer_store = DedupBufferStore(default_dedup_buffer_path(args.state))
+    buffer = buffer_store.load()
+
+    # Reader → MatchingSink (§5) → Deduplicator (§6) → CommittingLoggingSink.
+    # §6 v2.3: фиксация вектора в буфере дедупа отделена от проверки и
+    # вызывается только после подтверждённой публикации. Publisher'а пока нет
+    # (пакет 5), поэтому эту роль временно играет логирующий приёмник — он
+    # подтверждает публикацию безусловно, в отличие от будущего Publisher,
+    # который вызовет `commit` только на успешный форвард.
+    deduplicator = Deduplicator(
+        config_store=config_store,
+        buffer_store=buffer_store,
+        buffer=buffer,
+        sink=CommittingLoggingSink(tz=ZoneInfo(bundle.config.logging.timezone)),
+    )
+    matching_sink = MatchingSink(matcher=matcher, sink=deduplicator)
 
     reader = TelegramReader(
         client=client,

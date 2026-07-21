@@ -15,7 +15,7 @@ import yaml
 from tests.conftest import write_examples_files
 from tg_monitor.config_store import ConfigStore
 from tg_monitor.embedder import Vector
-from tg_monitor.matcher import CentroidStore, Matcher, MatchingSink
+from tg_monitor.matcher import CentroidStore, Matcher, MatchingSink, MatchResult
 from tg_monitor.models import Facet, Post, Topic
 
 FIXED_DATE = dt.datetime(2026, 7, 20, 15, 0, tzinfo=dt.UTC)
@@ -285,6 +285,25 @@ def test_matcher_takes_max_over_chunks_not_average(tmp_path: Path) -> None:
     assert results[0].raw_score == pytest.approx(1.0)
 
 
+def test_matcher_records_vector_of_winning_chunk_not_any_chunk(tmp_path: Path) -> None:
+    # Пакет 4, §6: MatchResult.vector — вектор чанка, давшего максимальный
+    # score победившей грани (тот же, что определил raw_score), а не первого
+    # чанка поста и не какой-то производной по всем чанкам. Deduplicator
+    # берёт этот вектор для дедупа без повторного эмбеддинга, поэтому важно
+    # закрепить именно это отдельным тестом, не полагаясь на raw_score.
+    topics = [_topic_dict(tmp_path, id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5)]
+    config_store = _write_configs(tmp_path, topics)
+    embedder = DictEmbedder(
+        {"пример а": (1, 0), "чанк не по теме": (-1, 0), "чанк точно по теме": (1, 0)}
+    )
+    matcher = Matcher(embedder=embedder, config_store=config_store)
+
+    results = matcher.score_post(_post("чанк не по теме\n\nчанк точно по теме"))
+
+    assert len(results) == 1
+    np.testing.assert_allclose(results[0].vector, _unit(1, 0), atol=1e-6)
+
+
 # --- Matcher: негативные примеры, §5.4, пункт 5 ------------------------------
 
 
@@ -464,9 +483,11 @@ def test_matcher_one_post_can_pass_several_topics(tmp_path: Path) -> None:
 class RecordingSink:
     def __init__(self) -> None:
         self.posts: list[Post] = []
+        self.results: list[list[MatchResult]] = []
 
-    async def handle(self, post: Post) -> None:
+    async def handle(self, post: Post, results: list[MatchResult]) -> None:
         self.posts.append(post)
+        self.results.append(results)
 
 
 def test_matching_sink_forwards_matched_post_once(tmp_path: Path) -> None:
