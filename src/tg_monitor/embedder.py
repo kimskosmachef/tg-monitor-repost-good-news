@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -71,15 +71,25 @@ class SentenceTransformerEmbedder:
         max_len = self._model.max_seq_length
         if max_len is None:
             return
-        tokenizer = self._model.tokenizer
-        for text in texts:
-            token_ids: list[int] = tokenizer(text, add_special_tokens=True)["input_ids"]
-            if len(token_ids) <= max_len:
-                continue
-            truncated_text: str = tokenizer.decode(token_ids[:max_len], skip_special_tokens=True)
-            logger.warning(
-                "токенизатор усекает вход: %d токенов при лимите модели %d, усечённый текст: %r",
-                len(token_ids),
-                max_len,
-                truncated_text,
-            )
+        _warn_on_truncation_batch(self._model.tokenizer, texts, max_len)
+
+
+def _warn_on_truncation_batch(tokenizer: Any, texts: Sequence[str], max_len: int) -> None:
+    # Один батч-вызов токенизатора на весь список чанков вместо цикла с
+    # вызовом на каждый текст по отдельности — раньше один и тот же список
+    # чанков токенизировался по одному тексту за раз (N вызовов), хотя
+    # быстрый токенизатор одинаково умеет принять список целиком за один
+    # проход.
+    if not texts:
+        return
+    batch = tokenizer(list(texts), add_special_tokens=True)["input_ids"]
+    for token_ids in batch:
+        if len(token_ids) <= max_len:
+            continue
+        truncated_text: str = tokenizer.decode(token_ids[:max_len], skip_special_tokens=True)
+        logger.warning(
+            "токенизатор усекает вход: %d токенов при лимите модели %d, усечённый текст: %r",
+            len(token_ids),
+            max_len,
+            truncated_text,
+        )
