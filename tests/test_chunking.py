@@ -84,6 +84,16 @@ def test_long_paragraph_splits_on_sentence_boundary_in_last_third() -> None:
     assert chunks[1].startswith("б" * 5)
 
 
+def test_period_outside_last_third_is_ignored_cuts_on_word_boundary() -> None:
+    # MAX=30, последняя треть — индексы [20:30). Точка стоит на позиции 5 —
+    # вне последней трети, поэтому игнорируется целиком: резать по ней нельзя,
+    # даже если она единственная точка во всём окне. Разрез идёт по границе
+    # слова (пробел на позиции 24), как будто точки не было вовсе.
+    text = "а" * 5 + "." + "б" * 18 + " " + "в" * 10
+    chunks = chunk_text(text, min_chunk_chars=MIN, max_chunk_chars=MAX)
+    assert chunks == ["а" * 5 + "." + "б" * 18, "в" * 10]
+
+
 def test_long_paragraph_splits_on_word_boundary_without_sentence_end() -> None:
     # Нет точки/!/?/… нигде в окне — ищем последний пробел во всём окне
     # (не только в последней трети) и режем по нему, без разрыва слова.
