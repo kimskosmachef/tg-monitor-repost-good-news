@@ -4,6 +4,9 @@
 версия центроида каждой темы (хэш от примеров). Запись атомарная
 (tempfile + os.replace). Отсутствие или порча файла — не падение,
 старт с текущего момента (буфер дедупа и last_message_id пустые).
+Испорченный файл не затирается валидным при следующей записи — он
+переименовывается в `<имя>.bad`, иначе посмертный разбор причины порчи
+невозможен.
 """
 
 from __future__ import annotations
@@ -93,13 +96,29 @@ class StateStore:
             raw = self._path.read_text(encoding="utf-8")
             data = json.loads(raw)
         except (OSError, json.JSONDecodeError) as exc:
-            self._log_state_loss(f"{self._path} повреждён ({exc})")
+            self._quarantine(f"{self._path} повреждён ({exc})")
             return StateData()
         try:
             return StateData.model_validate(data)
         except (ValidationError, TypeError) as exc:
-            self._log_state_loss(f"{self._path} не соответствует схеме ({exc})")
+            self._quarantine(f"{self._path} не соответствует схеме ({exc})")
             return StateData()
+
+    def _quarantine(self, reason: str) -> None:
+        # §8 v1.9: испорченный файл не затирается валидным при следующей
+        # записи — переименовывается в `<имя>.bad`, иначе разбирать причину
+        # порчи после факта будет не по чему.
+        self._log_state_loss(reason)
+        bad_path = self._path.with_name(f"{self._path.name}.bad")
+        try:
+            self._path.replace(bad_path)
+        except OSError as exc:
+            self._logger.error(
+                "не удалось переименовать %s в %s (%s), испорченный файл остался на месте",
+                self._path,
+                bad_path,
+                exc,
+            )
 
     def _log_state_loss(self, reason: str) -> None:
         # §8: файл был, но испорчен/не читается — это настоящая потеря

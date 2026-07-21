@@ -90,6 +90,49 @@ def test_load_schema_mismatch_logs_error_with_last_message_id_lost(
     assert "last_message_id" in caplog.text
 
 
+# --- §8 v1.9: испорченный файл переименовывается в .bad, не затирается ------
+
+
+def test_load_corrupt_json_quarantines_file_to_bad(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    store = StateStore(path)
+
+    store.load()
+
+    assert not path.exists()
+    bad_path = tmp_path / "state.json.bad"
+    assert bad_path.read_text(encoding="utf-8") == "{not valid json"
+
+
+def test_load_schema_mismatch_quarantines_file_to_bad(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    original = json.dumps({"last_message_id": "not-a-dict"})
+    path.write_text(original, encoding="utf-8")
+    store = StateStore(path)
+
+    store.load()
+
+    assert not path.exists()
+    bad_path = tmp_path / "state.json.bad"
+    assert bad_path.read_text(encoding="utf-8") == original
+
+
+def test_quarantined_file_is_not_overwritten_by_subsequent_save(tmp_path: Path) -> None:
+    # Разбор причины порчи должен оставаться возможным даже после того, как
+    # процесс перезаписал state.json валидными данными «с чистого листа».
+    path = tmp_path / "state.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    store = StateStore(path)
+
+    state = store.load()
+    store.save(state)
+
+    bad_path = tmp_path / "state.json.bad"
+    assert bad_path.read_text(encoding="utf-8") == "{not valid json"
+    assert path.exists()  # свежий валидный state.json, отдельно от .bad
+
+
 def test_save_then_load_roundtrip(tmp_path: Path) -> None:
     path = tmp_path / "state.json"
     store = StateStore(path)
