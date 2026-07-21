@@ -17,7 +17,7 @@ from typing import Protocol
 import numpy as np
 
 from tg_monitor.chunking import chunk_text
-from tg_monitor.config_store import ConfigStore
+from tg_monitor.config_store import ConfigBundle, ConfigStore
 from tg_monitor.embedder import Embedder, Vector
 from tg_monitor.models import Post, Source, Topic
 from tg_monitor.state import compute_topic_centroid_version
@@ -164,13 +164,22 @@ class Matcher:
         self._centroids = centroid_store or CentroidStore(embedder)
         self._logger = log or logger
 
-    def embed_post(self, post: Post) -> list[Vector] | None:
-        """Разбить пост на чанки и получить их векторы — единственный прямой вызов
-        эмбеддера на самом посте (§9: узкий try в `MatchingSink.handle` оборачивает
-        именно этот вызов, чтобы отличить сбой модели от прочих ошибок оценки).
+    def chunks_for(self, post: Post) -> tuple[ConfigBundle, list[str]] | None:
+        """Разбить пост на чанки — без обращения к эмбеддеру (§5.2, §5.3).
 
-        `None` — пост не даёт ни одного чанка (без текста, §5.3, либо после
+        Возвращает вместе со снимком конфига (`ConfigBundle`), взятым здесь
+        же через единственный вызов `config_store.get()` за весь проход
+        оценки — чтобы `score_chunks` ниже по цепочке видел ту же версию
+        `topics.yaml`/`sources.yaml`, что участвовала в чанковании, а не
+        перечитывал конфиг заново и не рисковал схватить более свежую
+        версию, изменившуюся между двумя вызовами `get()` (§4: конфиг
+        перечитывается по mtime на лету).
+
+        `None` — пост не даёт ни одного чанка (без текста либо после
         чанкования не осталось непустых абзацев): дальше оценивать нечего.
+        Сбой здесь (например, сам `config_store.get()`) — не сбой
+        эмбеддера, это учитывает разбивка ошибок в `MatchingSink.handle`
+        (§9 v1.9).
         """
         if not post.text:
             return None
@@ -182,16 +191,30 @@ class Matcher:
         )
         if not chunks:
             return None
+        return bundle, chunks
+
+    def embed_chunks(self, chunks: list[str]) -> list[Vector]:
+        """Единственный прямой вызов эмбеддера на чанках поста (§9 v1.9).
+
+        Специально вынесен в отдельный метод, ничего кроме `embedder.embed()`
+        не делающий: узкий try в `MatchingSink.handle` оборачивает именно
+        этот вызов, чтобы отличить сбой модели (OOM и т.п.) от прочих ошибок
+        оценки — не рискуя случайно накрыть тем же try чанкование или
+        обращение к ConfigStore.
+        """
         return self._embedder.embed(chunks)
 
-    def score_chunks(self, post: Post, chunk_vectors: list[Vector]) -> list[MatchResult]:
+    def score_chunks(
+        self, post: Post, bundle: ConfigBundle, chunk_vectors: list[Vector]
+    ) -> list[MatchResult]:
         """Оценить уже полученные векторы чанков по всем темам (§5).
 
-        Отдельно от `embed_post` ради §9: центроиды тем тоже считаются через
-        эмбеддер (`CentroidStore`), но их сбой — это уже «прочая ошибка при
-        оценке поста», а не сбой эмбеддера на самом посте.
+        `bundle` — тот же снимок конфига, что вернул `chunks_for` для этого
+        поста, а не новый вызов `config_store.get()` (см. `chunks_for`).
+        Отдельно от `embed_chunks` ради §9: центроиды тем тоже считаются
+        через эмбеддер (`CentroidStore`), но их сбой — это уже «прочая
+        ошибка при оценке поста», а не сбой эмбеддера на самом посте.
         """
-        bundle = self._config_store.get()
         boost = source_boost(bundle.sources, post.source_id)
 
         results: list[MatchResult] = []
@@ -206,14 +229,17 @@ class Matcher:
     def score_post(self, post: Post) -> list[MatchResult]:
         """Оценить пост по всем темам. §5.3: пост без текста не оценивается вовсе.
 
-        Удобная обёртка над `embed_post` + `score_chunks` для вызывающих, которым
-        не нужно различать источник ошибки (scripts/score.py, тесты) —
-        `MatchingSink.handle` использует эти два метода раздельно.
+        Удобная обёртка над `chunks_for` + `embed_chunks` + `score_chunks`
+        для вызывающих, которым не нужно различать источник ошибки
+        (scripts/score.py, тесты) — `MatchingSink.handle` использует эти
+        методы раздельно.
         """
-        chunk_vectors = self.embed_post(post)
-        if chunk_vectors is None:
+        chunked = self.chunks_for(post)
+        if chunked is None:
             return []
-        return self.score_chunks(post, chunk_vectors)
+        bundle, chunks = chunked
+        chunk_vectors = self.embed_chunks(chunks)
+        return self.score_chunks(post, bundle, chunk_vectors)
 
     def _score_topic(
         self,
@@ -299,38 +325,39 @@ class MatchingSink:
             )
             return
 
-        # §9 v1.9: узкий try вокруг самого вызова эмбеддера — сбой модели
-        # (OOM и т.п.) не должен долетать до Reader (там он попал бы в общий
-        # except и last_message_id не продвинулся бы, а следующий добор
-        # истории обработал бы тот же пост заново до следующего же сбоя).
-        # Пост штатно помечается обработанным — TODO(пакет 6): уведомление
-        # в служебный канал.
+        # §9 v1.9: сбой на любом из шагов не должен долетать до Reader — там
+        # он попал бы в общий except, last_message_id не продвинулся бы, и
+        # следующий добор истории обработал бы тот же пост заново до
+        # следующего же сбоя. Пост в любой из веток штатно помечается
+        # обработанным — TODO(пакет 6): уведомление в служебный канал.
+        # Общий try: чанкование и обращение к ConfigStore — это не сбой
+        # эмбеддера, даже если оба относятся к тому же score_post.
         try:
-            chunk_vectors = self._matcher.embed_post(post)
+            chunked = self._matcher.chunks_for(post)
         except Exception:
-            self._logger.exception(
-                "ошибка эмбеддера при оценке поста, пост помечен обработанным без "
-                "повтора: source=%s message_id=%s",
-                post.source_id,
-                post.message_id,
-            )
+            self._log_scoring_error("ошибка при оценке поста", post)
             return
 
-        if chunk_vectors is None:
+        if chunked is None:
             results: list[MatchResult] = []
         else:
+            bundle, chunks = chunked
+            # Узкий try — только сам вызов эмбеддера (self._matcher.embed_chunks
+            # больше ничего не делает), чтобы сбой модели (OOM и т.п.) не
+            # маскировался под что-то другое и наоборот.
+            try:
+                chunk_vectors = self._matcher.embed_chunks(chunks)
+            except Exception:
+                self._log_scoring_error("ошибка эмбеддера", post)
+                return
+
             # Общий try вокруг остального score_post (сопоставление с темами,
             # пересчёт центроидов и т.п.) — причина в логе честная, не
             # маскируется под сбой эмбеддера на самом посте.
             try:
-                results = self._matcher.score_chunks(post, chunk_vectors)
+                results = self._matcher.score_chunks(post, bundle, chunk_vectors)
             except Exception:
-                self._logger.exception(
-                    "ошибка при оценке поста, пост помечен обработанным без "
-                    "повтора: source=%s message_id=%s",
-                    post.source_id,
-                    post.message_id,
-                )
+                self._log_scoring_error("ошибка при оценке поста", post)
                 return
 
         if not results:
@@ -354,3 +381,11 @@ class MatchingSink:
                 post.message_id,
             )
         await self._sink.handle(post)
+
+    def _log_scoring_error(self, reason: str, post: Post) -> None:
+        self._logger.exception(
+            "%s, пост помечен обработанным без повтора: source=%s message_id=%s",
+            reason,
+            post.source_id,
+            post.message_id,
+        )
