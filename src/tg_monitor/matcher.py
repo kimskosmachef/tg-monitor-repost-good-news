@@ -272,7 +272,23 @@ class MatchingSink:
             )
             return
 
-        results = self._matcher.score_post(post)
+        try:
+            results = self._matcher.score_post(post)
+        except Exception:
+            # Блокер §9: ошибка эмбеддера (сбой модели, OOM и т.п.) не должна
+            # долетать до Reader — там она попала бы в общий except и
+            # last_message_id не продвинулся бы, а Reader на следующем доборе
+            # истории обработал бы тот же пост заново до следующего же сбоя.
+            # Здесь пост штатно помечается обработанным: лог с id и причиной
+            # есть, ретраить нечем — TODO(пакет 6): уведомление в служебный канал.
+            self._logger.exception(
+                "ошибка эмбеддера при оценке поста, пост помечен обработанным без "
+                "повтора: source=%s message_id=%s",
+                post.source_id,
+                post.message_id,
+            )
+            return
+
         if not results:
             self._logger.info(
                 "пост не прошёл ни одной темы: source=%s message_id=%s",

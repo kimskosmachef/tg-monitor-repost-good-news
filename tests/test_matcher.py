@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -419,7 +420,9 @@ def test_matching_sink_forwards_matched_post_once(tmp_path: Path) -> None:
     assert len(downstream.posts) == 1
 
 
-def test_matching_sink_does_not_forward_unmatched_post(tmp_path: Path) -> None:
+def test_matching_sink_does_not_forward_unmatched_post(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     topics = [_topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.99)]
     config_store = _write_configs(tmp_path, topics)
     embedder = DictEmbedder({"пример а": (1, 0), "текст поста": (0, 1)})
@@ -427,12 +430,23 @@ def test_matching_sink_does_not_forward_unmatched_post(tmp_path: Path) -> None:
     downstream = RecordingSink()
     sink = MatchingSink(matcher=matcher, sink=downstream)
 
-    asyncio.run(sink.handle(_post("текст поста")))
+    with caplog.at_level(logging.INFO, logger="tg_monitor.matcher"):
+        asyncio.run(sink.handle(_post("текст поста", source_id="src_a", message_id=7)))
 
     assert downstream.posts == []
+    # Не только "не ушло дальше" — в логе действительно есть строка с id,
+    # по которой пост можно найти после факта (пункт 4 промпта пакета 3).
+    assert any(
+        "не прошёл ни одной темы" in record.getMessage()
+        and "src_a" in record.getMessage()
+        and "7" in record.getMessage()
+        for record in caplog.records
+    )
 
 
-def test_matching_sink_does_not_forward_post_without_text(tmp_path: Path) -> None:
+def test_matching_sink_does_not_forward_post_without_text(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     topics = [_topic_dict(id_="t1")]
     config_store = _write_configs(tmp_path, topics)
     embedder = DictEmbedder({"пример а": (1, 0)})
@@ -440,6 +454,46 @@ def test_matching_sink_does_not_forward_post_without_text(tmp_path: Path) -> Non
     downstream = RecordingSink()
     sink = MatchingSink(matcher=matcher, sink=downstream)
 
-    asyncio.run(sink.handle(_post(None)))
+    with caplog.at_level(logging.INFO, logger="tg_monitor.matcher"):
+        asyncio.run(sink.handle(_post(None, source_id="src_a", message_id=9)))
 
     assert downstream.posts == []
+    assert any(
+        "без текста не оценивается" in record.getMessage()
+        and "src_a" in record.getMessage()
+        and "9" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+# --- MatchingSink: ошибка эмбеддера не пробрасывается в Reader, блокер §9 ---
+
+
+class FailingEmbedder:
+    """Падает при любом embed() — имитирует сбой модели/OOM."""
+
+    def embed(self, texts: Sequence[str]) -> list[Vector]:
+        raise RuntimeError("сбой эмбеддера")
+
+
+def test_matching_sink_swallows_embedder_error_and_marks_post_handled(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    topics = [_topic_dict(id_="t1", facets={"facet_a": ["пример а"]}, threshold=0.5)]
+    config_store = _write_configs(tmp_path, topics)
+    matcher = Matcher(embedder=FailingEmbedder(), config_store=config_store)
+    downstream = RecordingSink()
+    sink = MatchingSink(matcher=matcher, sink=downstream)
+
+    with caplog.at_level(logging.ERROR, logger="tg_monitor.matcher"):
+        # Не должно поднять исключение выше — иначе оно долетит до Reader
+        # и last_message_id не продвинется, пост будет обработан заново.
+        asyncio.run(sink.handle(_post("текст поста", source_id="src_a", message_id=11)))
+
+    assert downstream.posts == []
+    assert any(
+        record.levelno == logging.ERROR
+        and "src_a" in record.getMessage()
+        and "11" in record.getMessage()
+        for record in caplog.records
+    )
